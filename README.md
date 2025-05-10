@@ -5,10 +5,6 @@
 [![GitHub issues](https://img.shields.io/github/issues/JoyinJoester/Fuckvim)](https://github.com/JoyinJoester/Fuckvim/issues)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/JoyinJoester/Fuckvim/main/assets/logo.png" alt="FKVim Logo" width="200" height="200" onerror="this.style.display='none'"/>
-</p>
-
 > 🚀 强大的模态编辑器，结合了 Vim 的高效与现代编辑器的友好体验
 
 ## 📋 功能概览
