@@ -3,6 +3,14 @@ name = "fkvim"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "fkvim"
+path = "src/main.rs"
+
+[[bin]]
+name = "fvim"
+path = "src/main.rs"
+
 [profile.dev]
 panic = "abort"
 

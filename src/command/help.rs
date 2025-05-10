@@ -1,6 +1,5 @@
 // filepath: /home/joyin/桌面/fkvim/src/command/help.rs
 use std::collections::HashMap;
-use crate::error::{Result, FKVimError};
 
 /// 命令帮助信息
 #[derive(Debug, Clone)]
@@ -22,7 +21,7 @@ pub struct CommandHelp {
 }
 
 /// 帮助分类
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum HelpCategory {
     /// 编辑器基础
     Basics,
@@ -306,5 +305,37 @@ impl HelpSystem {
         text.push_str("使用 :help <分类名> 查看特定分类的命令列表\n");
         
         text
+    }
+
+    /// 获取通用帮助信息
+    pub fn get_general_help(&self) -> String {
+        self.format_help_overview()
+    }
+    
+    /// 获取特定主题的帮助信息
+    pub fn get_topic_help(&self, topic: &str) -> String {
+        // 尝试查找对应的命令
+        if let Some(command) = self.get_command(topic) {
+            return self.format_command_help(command);
+        }
+        
+        // 尝试查找对应的分类
+        if let Some(category) = self.parse_category(topic) {
+            return self.format_category_help(&category);
+        }
+        
+        // 尝试模糊匹配命令
+        let matches = self.fuzzy_match(topic);
+        if !matches.is_empty() {
+            let mut result = format!("找到与 \"{}\" 相关的命令:\n\n", topic);
+            for cmd in matches {
+                result.push_str(&format!("{:10} - {}\n", cmd.name, cmd.description));
+            }
+            return result;
+        }
+        
+        // 没有找到相关信息，返回默认帮助
+        format!("没有找到关于 \"{}\" 的帮助信息。\n\n以下是可用的命令分类：\n{}", 
+                topic, self.format_help_overview())
     }
 }

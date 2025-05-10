@@ -44,13 +44,22 @@ fn run() -> Result<()> {
 }
 
 fn main() {
+    // 获取可执行文件名，用于日志文件名称
+    let exec_name = env::current_exe()
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| String::from("fkvim"));
+    
+    // 确定日志文件名
+    let log_filename = format!("{}_error.log", exec_name);
+    
     if let Err(e) = run() {
         // 同时将错误写入文件
         let error_msg = format!("错误: {:?}", e);
         eprintln!("{}", error_msg);
         
         // 将错误写入日志文件
-        std::fs::write("fkvim_error.log", error_msg)
+        std::fs::write(&log_filename, error_msg)
             .unwrap_or_else(|_| eprintln!("无法将错误写入日志文件"));
             
         std::process::exit(1);

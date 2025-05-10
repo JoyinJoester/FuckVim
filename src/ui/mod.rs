@@ -239,7 +239,14 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, editor: &mut Editor) -> Resul
                                 editor.command_line.mode = CommandLineMode::Normal;
                                 editor.set_mode(EditorMode::Normal);
                                 if !cmd.is_empty() {
-                                    let _ = editor.execute_command(&cmd);
+                                    // 执行命令并处理可能的错误
+                                    if let Err(err) = editor.execute_command(&cmd) {
+                                        // 设置错误消息，确保明确标记为错误并且格式统一
+                                        editor.set_status_message(format!("错误: {}", err), StatusMessageType::Error);
+                                    } else {
+                                        // 命令成功执行时显示执行信息
+                                        editor.set_status_message(format!("执行命令: {}", cmd), StatusMessageType::Success);
+                                    }
                                 }
                                 true
                             },
@@ -352,8 +359,17 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, editor: &mut Editor) -> Resul
                                 }
                             },
                             crate::input::InputAction::ExecuteCommand(cmd) => {
-                                // 执行命令
-                                let _ = editor.execute_command(&cmd);
+                                // 记录执行的命令
+                                let cmd_msg = format!("执行命令: {}", cmd);
+                                
+                                // 执行命令并处理可能的错误
+                                if let Err(err) = editor.execute_command(&cmd) {
+                                    // 设置错误消息，但不影响界面布局
+                                    editor.set_status_message(format!("命令错误: {}", err), StatusMessageType::Error);
+                                } else {
+                                    // 命令成功执行时也显示执行信息
+                                    editor.set_status_message(cmd_msg, StatusMessageType::Info);
+                                }
                             },
                             crate::input::InputAction::SwitchMode(mode) => {
                                 // 切换模式
@@ -467,43 +483,38 @@ fn ui(f: &mut Frame, editor: &Editor) {
     let area = f.area();
     let terminal_visible = editor.terminal_visible;
     
+    // 计算主界面和各区域的高度，保证布局一致
+    let status_bar_height = 3;  // 状态栏固定高度 (包含上下边框)
+    let cmd_line_height = 3;    // 命令行固定高度 (包含上下边框)
+    
     // 计算主界面区域
     let main_area = if terminal_visible {
         let terminal_height = editor.terminal_height.min((area.height as u16) / 2);
-        Rect::new(0, 0, area.width, area.height - terminal_height)
+        Rect::new(0, 0, area.width, area.height - terminal_height - status_bar_height - cmd_line_height)
     } else {
-        // 减去状态栏和命令行的高度（每个都占用1行）
-        Rect::new(0, 0, area.width, area.height - 2)
+        // 减去状态栏和命令行的高度
+        Rect::new(0, 0, area.width, area.height - status_bar_height - cmd_line_height)
     };
     
     // 绘制编辑器主窗口
     draw_editor(f, editor, main_area);
     
     // 绘制终端区域（如果可见）
-    if terminal_visible {
+    let (status_y, cmd_y) = if terminal_visible {
         let terminal_height = editor.terminal_height.min((area.height as u16) / 2);
-        let terminal_area = Rect::new(0, area.height - terminal_height, area.width, terminal_height);
+        let terminal_area = Rect::new(0, main_area.height, area.width, terminal_height);
         draw_terminal(f, editor, terminal_area);
-    }
-    
-    // 绘制状态栏和命令行，确保它们紧跟在主区域之后
-    let status_y = if terminal_visible {
-        main_area.height
+        
+        (main_area.height + terminal_height, main_area.height + terminal_height + status_bar_height)
     } else {
-        area.height - 2
+        (main_area.height, main_area.height + status_bar_height)
     };
     
-    let cmd_y = if terminal_visible {
-        main_area.height + 1
-    } else {
-        area.height - 1
-    };
+    // 绘制状态栏 - 固定在主区域和终端区域之后
+    draw_status_bar(f, editor, Rect::new(0, status_y, area.width, status_bar_height));
     
-    // 绘制状态栏
-    draw_status_bar(f, editor, Rect::new(0, status_y, area.width, 1));
-    
-    // 绘制命令行
-    draw_command_line(f, editor, Rect::new(0, cmd_y, area.width, 1));
+    // 绘制命令行 - 固定在状态栏之后
+    draw_command_line(f, editor, Rect::new(0, cmd_y, area.width, cmd_line_height));
 }
 
 /// 绘制编辑器
@@ -906,11 +917,35 @@ fn draw_status_bar(
     // 创建状态栏段落
     let items = render_status_bar(editor);
     
+    // 始终添加完整边框，确保布局一致，并根据消息类型调整边框颜色
+    let border_style = if let Some(status_msg) = &editor.status_message {
+        if status_msg.msg_type == StatusMessageType::Error {
+            Style::default().fg(Color::Red)    // 错误时使用红色边框
+        } else {
+            Style::default().fg(Color::Blue)   // 正常状态使用蓝色边框
+        }
+    } else {
+        Style::default().fg(Color::Blue)
+    };
+    
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style);
+    
+    // 根据消息类型选择背景色，错误时保留背景色以增强可见性
+    let style = if let Some(status_msg) = &editor.status_message {
+        if status_msg.msg_type == StatusMessageType::Error {
+            Style::default().bg(Color::Black)    // 错误使用黑色背景以确保可读性
+        } else {
+            Style::default()    // 其他情况使用透明背景
+        }
+    } else {
+        Style::default()        // 默认使用透明背景
+    };
+    
     let status_bar = Paragraph::new(Line::from(items))
-        .block(Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(Color::Blue)))
-        .style(Style::default().bg(Color::Black));
+        .block(block)
+        .style(style);
     
     f.render_widget(status_bar, area);
 }
@@ -923,15 +958,48 @@ fn draw_command_line(
 ) {
     let items = render_command_line(editor);
     
+    // 创建命令行区域，确保布局一致
+    // 始终显示边框，保证布局统一，且错误状态有明显的边框颜色区分
+    let border_style = if let Some(status_msg) = &editor.status_message {
+        if status_msg.msg_type == StatusMessageType::Error {
+            Style::default().fg(Color::Red)  // 错误时使用红色边框
+        } else {
+            Style::default().fg(Color::Gray) // 正常状态使用灰色边框
+        }
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style);
+    
+    // 根据状态设置样式，错误时保留背景色以增强可见性
+    let style = if let Some(status_msg) = &editor.status_message {
+        if status_msg.msg_type == StatusMessageType::Error {
+            Style::default().bg(Color::Black)    // 错误使用黑色背景增加对比度
+        } else {
+            Style::default()    // 其他情况使用透明背景
+        }
+    } else {
+        Style::default()        // 默认使用透明背景
+    };
+    
     let command_line = Paragraph::new(Line::from(items))
-        .block(Block::default().borders(Borders::NONE))
-        .style(Style::default().bg(Color::Black));
+        .block(block)
+        .style(style);
     
     // 设置光标位置
     if editor.command_line.mode == CommandLineMode::Command {
         // 光标位置是前缀 ":" 之后，加上当前内容的长度
         let cursor_offset = 1 + editor.command_line.cursor_pos;
-        f.set_cursor_position((area.x + cursor_offset as u16, area.y));
+        // 考虑边框的影响，内容区域从(area.x + 1, area.y + 1)开始
+        f.set_cursor_position((area.x + 1 + cursor_offset as u16, area.y + 1));
+    } else if editor.command_line.mode == CommandLineMode::Search {
+        // 搜索模式下，光标位置是前缀 "/" 之后
+        let cursor_offset = 1 + editor.command_line.cursor_pos;
+        // 考虑边框的影响，内容区域从(area.x + 1, area.y + 1)开始
+        f.set_cursor_position((area.x + 1 + cursor_offset as u16, area.y + 1));
     }
     
     f.render_widget(command_line, area);
@@ -1085,7 +1153,7 @@ fn render_status_bar(editor: &Editor) -> Vec<Span> {
         Err(_) => {
             // 无效的缓冲区，返回空状态栏
             return vec![
-                Span::styled("无可用缓冲区", Style::default().fg(Color::Red))
+                Span::styled("无可用缓冲区", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD))
             ];
         }
     };
@@ -1101,24 +1169,34 @@ fn render_status_bar(editor: &Editor) -> Vec<Span> {
     
     // 右侧：行号、列号、模式
     let position = format!("{}:{}", editor.cursor_line + 1, editor.cursor_col + 1);
+    
+    // 模式显示，使用不同颜色区分
+    let mode_style = match editor.mode {
+        EditorMode::Normal => Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+        EditorMode::Insert => Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD),
+        EditorMode::Visual => Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+        EditorMode::Command => Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
+        EditorMode::Replace => Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+        EditorMode::Terminal => Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+    };
     let mode = format!("{:?}", editor.mode);
 
     // 组合所有组件
     vec![
         // 左侧信息
-        Span::styled(format!(" {} {}", file_name, modified), 
-            Style::default().fg(Color::White)),
+        Span::styled(format!(" {} ", file_name), Style::default().fg(Color::LightCyan)),
+        Span::styled(modified, Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
         
         // 中间填充
         Span::raw(" ".repeat(
             editor.screen_width.saturating_sub(
-                file_name.len() + modified.len() + position.len() + mode.len() + 4
+                file_name.len() + modified.len() + position.len() + mode.len() + 8
             )
         )),
         
         // 右侧信息
-        Span::styled(format!("{} | {} ", position, mode),
-            Style::default().fg(Color::White))
+        Span::styled(format!("{} | ", position), Style::default().fg(Color::LightGreen)),
+        Span::styled(format!("{} ", mode), mode_style)
     ]
 }
 
@@ -1128,18 +1206,19 @@ fn render_command_line(editor: &Editor) -> Vec<Span> {
         CommandLineMode::Normal => {
             // 普通模式下不显示命令行，如果有状态消息则显示
             if let Some(status_msg) = &editor.status_message {
+                // 为不同类型的消息设置明确的样式区分
                 let style = match status_msg.msg_type {
-                    StatusMessageType::Info => Style::default().fg(Color::White),
-                    StatusMessageType::Warning => Style::default().fg(Color::Yellow),
-                    StatusMessageType::Error => Style::default().fg(Color::Red),
-                    StatusMessageType::Success => Style::default().fg(Color::Green),
+                    StatusMessageType::Info => Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    StatusMessageType::Warning => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    StatusMessageType::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD | Modifier::RAPID_BLINK),
+                    StatusMessageType::Success => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
                 };
                 
                 vec![
                     Span::styled(format!(" {}", status_msg.content), style)
                 ]
             } else {
-                // 无状态消息时显示空命令行或模式信息
+                // 无状态消息时显示当前模式
                 let mode_str = match editor.mode {
                     EditorMode::Normal => "普通",
                     EditorMode::Insert => "插入",
@@ -1148,27 +1227,27 @@ fn render_command_line(editor: &Editor) -> Vec<Span> {
                     EditorMode::Replace => "替换",
                     EditorMode::Terminal => "终端",
                 };
-                vec![Span::styled(format!(" {} 模式", mode_str), Style::default().fg(Color::White))]
+                vec![Span::styled(format!(" {} 模式", mode_str), Style::default().fg(Color::Cyan))]
             }
         },
         CommandLineMode::Command => {
-            // 命令模式显示当前输入的命令
+            // 命令模式显示当前输入的命令，保持清晰可见
             vec![
-                Span::styled(":", Style::default().fg(Color::White)),
+                Span::styled(":", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
                 Span::styled(&editor.command_line.content, Style::default().fg(Color::White))
             ]
         },
         CommandLineMode::Search => {
             // 搜索模式显示搜索内容
             vec![
-                Span::styled("/", Style::default().fg(Color::White)),
-                Span::styled(&editor.command_line.content, Style::default().fg(Color::White))
+                Span::styled("/", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                Span::styled(&editor.command_line.content, Style::default().fg(Color::Magenta))
             ]
         },
         CommandLineMode::ReplaceConfirm => {
             // 替换确认模式
             vec![
-                Span::styled("替换此处? (y/n/a/q)", Style::default().fg(Color::Yellow))
+                Span::styled("替换此处? (y/n/a/q)", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
             ]
         }
     }

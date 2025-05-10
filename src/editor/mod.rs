@@ -101,6 +101,9 @@ pub struct Editor {
 
     /// 最后一次执行的命令
     pub last_command: String,
+
+    /// 帮助系统
+    pub help_system: crate::command::help::HelpSystem,
 }
 
 /// 编辑器模式
@@ -367,6 +370,9 @@ impl Editor {
         // 创建标签管理器
         let tab_manager = TabManager::new();
         
+        // 创建帮助系统
+        let help_system = crate::command::help::HelpSystem::new();
+        
         // 返回编辑器实例
         let mut editor = Self {
             config,
@@ -400,6 +406,7 @@ impl Editor {
             },
             repeat_count: 0,
             last_command: String::new(),
+            help_system: help_system,
         };
         
         // 使用更新后的编辑器实例初始化系统
@@ -785,7 +792,8 @@ impl Editor {
             _ => {
                 // 尝试通过 Lua 执行命令
                 if let Err(_) = self.lua_env.execute_command(command) {
-                    return Err(FKVimError::CommandError(format!("未知命令: {}", command)));
+                    // 使用统一的错误格式，同时保持Vim风格的错误码
+                    return Err(FKVimError::CommandError(format!("E492: 不是编辑器命令: {}", command)));
                 }
             }
         }

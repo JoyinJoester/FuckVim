@@ -5,6 +5,8 @@ use crate::editor::StatusMessage;
 use std::collections::HashMap;
 use std::path::Path;
 
+pub mod help;
+
 /// 自定义命令定义
 #[derive(Clone)]
 pub struct UserCommand {
@@ -786,14 +788,13 @@ impl CommandExecutor {
                 Ok(())
             },
             BuiltinCommand::Help(topic) => {
-                // 显示帮助
+                // 显示帮助信息
                 let help_content = if let Some(topic) = topic {
-                    // 查找特定主题
-                    format!("关于主题「{}」的帮助", topic)
-                    // 这里应该调用实际的帮助系统
+                    // 查找特定主题的帮助内容
+                    editor.help_system.get_topic_help(&topic)
                 } else {
-                    // 显示通用帮助
-                    "FKVIM 帮助系统\n\n命令列表:\n:q - 退出\n:w - 保存\n:e <文件> - 打开文件".to_string()
+                    // 显示通用帮助信息
+                    editor.help_system.get_general_help()
                 };
                 
                 editor.status_message = Some(StatusMessage {
