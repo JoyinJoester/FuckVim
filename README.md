@@ -1,4 +1,4 @@
-# FuckVim - 一个现代化的 Vim 替代品
+# FuckVim - 一个基于rust的 Vim 替代品(未补完)
 
 [![GitHub license](https://img.shields.io/github/license/JoyinJoester/Fuckvim)](https://github.com/JoyinJoester/Fuckvim/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/JoyinJoester/Fuckvim)](https://github.com/JoyinJoester/Fuckvim/stargazers)
