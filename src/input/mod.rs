@@ -79,6 +79,7 @@ impl KeyHandler {
             EditorMode::Command => self.handle_command_key(key),
             EditorMode::Replace => self.handle_replace_key(key),
             EditorMode::Terminal => self.handle_terminal_key(key),
+            EditorMode::FileManager => self.handle_file_manager_key(key),
         }
     }
     
@@ -365,6 +366,69 @@ impl KeyHandler {
                 // 在终端模式下，所有按键都直接传递给终端
                 Ok(InputAction::Insert(key.to_string()))
             }
+        }
+    }
+    
+    /// 处理文件管理器模式下的按键
+    fn handle_file_manager_key(&mut self, key: &str) -> Result<InputAction> {
+        match key {
+            "<Esc>" => {
+                let editor = unsafe { &mut *self.editor };
+                editor.file_manager_visible = false;
+                Ok(InputAction::SwitchMode(EditorMode::Normal))
+            },
+            "j" | "<Down>" => {
+                let editor = unsafe { &mut *self.editor };
+                if let Some(ref mut file_browser) = editor.file_browser {
+                    file_browser.move_cursor_down();
+                }
+                Ok(InputAction::None)
+            },
+            "k" | "<Up>" => {
+                let editor = unsafe { &mut *self.editor };
+                if let Some(ref mut file_browser) = editor.file_browser {
+                    file_browser.move_cursor_up();
+                }
+                Ok(InputAction::None)
+            },
+            "<Enter>" => {
+                let editor = unsafe { &mut *self.editor };
+                if let Some(ref mut file_browser) = editor.file_browser {
+                    if let Some(selected) = file_browser.get_selected_item() {
+                        if selected.is_dir {
+                            let _ = file_browser.enter_directory(&selected.path);
+                        } else {
+                            // 打开文件
+                            let _ = editor.open_file(&selected.path);
+                            editor.file_manager_visible = false;
+                            return Ok(InputAction::SwitchMode(EditorMode::Normal));
+                        }
+                    }
+                }
+                Ok(InputAction::None)
+            },
+            "h" | "<Left>" | "<Backspace>" => {
+                let editor = unsafe { &mut *self.editor };
+                if let Some(ref mut file_browser) = editor.file_browser {
+                    let _ = file_browser.go_up_directory();
+                }
+                Ok(InputAction::None)
+            },
+            " " => { // 空格键切换选中状态
+                let editor = unsafe { &mut *self.editor };
+                if let Some(ref mut file_browser) = editor.file_browser {
+                    let _ = file_browser.toggle_selection();
+                    file_browser.move_cursor_down();
+                }
+                Ok(InputAction::None)
+            },
+            ":" => {
+                // 切换到命令模式
+                let editor = unsafe { &mut *self.editor };
+                editor.switch_to_command_mode();
+                Ok(InputAction::SwitchMode(EditorMode::Command))
+            },
+            _ => Ok(InputAction::None),
         }
     }
     

@@ -127,6 +127,33 @@ pub struct FileBrowser {
     pub search_idx: usize,
 }
 
+// 为FileBrowser实现Clone特性
+impl Clone for FileBrowser {
+    fn clone(&self) -> Self {
+        Self {
+            current_dir: self.current_dir.clone(),
+            items: self.items.clone(),
+            file_items: self.file_items.clone(),
+            filtered_indices: self.filtered_indices.clone(),
+            selected_idx: self.selected_idx,
+            scroll: self.scroll,
+            sort_mode: self.sort_mode,
+            sort_reverse: self.sort_reverse,
+            filter_text: self.filter_text.clone(),
+            preview_enabled: self.preview_enabled,
+            preview_content: self.preview_content.clone(),
+            bookmarks: self.bookmarks.clone(),
+            show_hidden: self.show_hidden,
+            entries: self.entries.clone(),
+            cursor: self.cursor,
+            view_mode: self.view_mode,
+            filter: self.filter.clone(),
+            search_results: self.search_results.clone(),
+            search_idx: self.search_idx,
+        }
+    }
+}
+
 impl FileBrowser {
     /// 创建一个新的文件浏览器
     pub fn new(path: Option<&Path>) -> Result<Self> {
@@ -178,18 +205,57 @@ impl FileBrowser {
     /// 刷新当前目录内容
     pub fn refresh(&mut self) -> Result<()> {
         self.items.clear();
+        self.entries.clear();
         
         // 添加 ".." 条目用于返回上一级目录
         let parent_dir = self.current_dir.join("..");
-        self.items.push(parent_dir);
+        self.items.push(parent_dir.clone());
+        
+        // 添加到entries
+        self.entries.push(FileEntry {
+            path: parent_dir,
+            is_dir: true,
+            name: "..".to_string(),
+            size: 0,
+            selected: false,
+        });
         
         // 读取当前目录内容
         for entry in fs::read_dir(&self.current_dir)? {
             let entry = entry?;
-            self.items.push(entry.path());
+            let path = entry.path();
+            let is_dir = path.is_dir();
+            let name = path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| "[未知]".to_string());
+            
+            let size = if is_dir {
+                0 // 目录大小暂时不计算
+            } else {
+                entry.metadata().map(|m| m.len()).unwrap_or(0)
+            };
+            
+            self.items.push(path.clone());
+            self.entries.push(FileEntry {
+                path,
+                is_dir,
+                name,
+                size,
+                selected: false,
+            });
         }
         
         // 对内容进行排序：目录在前，文件在后，每组内按名称排序
+        self.entries.sort_by(|a, b| {
+            if a.is_dir && !b.is_dir {
+                std::cmp::Ordering::Less
+            } else if !a.is_dir && b.is_dir {
+                std::cmp::Ordering::Greater
+            } else {
+                a.name.cmp(&b.name)
+            }
+        });
+        
         self.items.sort_by(|a, b| {
             let a_is_dir = a.is_dir();
             let b_is_dir = b.is_dir();
@@ -207,6 +273,7 @@ impl FileBrowser {
         
         // 重置选择索引
         self.selected_idx = 0;
+        self.cursor = 0;
         
         Ok(())
     }
@@ -769,6 +836,11 @@ impl FileBrowser {
                 self.go_up_directory()?;
                 Ok(true)
             },
+            " " => { // 空格键切换选中状态
+                self.toggle_selection()?;
+                self.move_cursor_down(); // 选中后自动下移
+                Ok(true)
+            },
             "/" => {
                 // 在文件浏览器中搜索
                 Ok(true) // 实际实现会处理输入等
@@ -860,6 +932,31 @@ impl FileBrowser {
         } else {
             let index = self.filtered_indices[self.cursor];
             Some(self.file_items[index].clone())
+        }
+    }
+    
+    /// 切换选中状态
+    pub fn toggle_selection(&mut self) -> Result<()> {
+        if self.entries.is_empty() {
+            return Ok(());
+        }
+        
+        if self.cursor < self.entries.len() {
+            self.entries[self.cursor].selected = !self.entries[self.cursor].selected;
+        }
+        
+        Ok(())
+    }
+    
+    /// 获取所有选中的项目
+    pub fn get_selected_entries(&self) -> Vec<&FileEntry> {
+        self.entries.iter().filter(|entry| entry.selected).collect()
+    }
+    
+    /// 清除所有选中
+    pub fn clear_selections(&mut self) {
+        for entry in &mut self.entries {
+            entry.selected = false;
         }
     }
 }

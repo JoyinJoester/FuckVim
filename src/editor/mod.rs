@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path};
 use std::time::{Instant};
+use crossterm::event::{KeyCode, KeyEvent};
 
 // 修正导入
 use crate::config::Config;
@@ -12,6 +13,7 @@ use crate::plugin::lua::LuaEnv;
 use crate::plugin::nvim_compat::NeovimCompat;
 use crate::plugin::package_manager::PackageManager;
 use crate::file_browser::FileBrowser;
+use crate::ui::key_event_to_str;
 
 pub mod window;
 pub mod status;
@@ -72,6 +74,12 @@ pub struct Editor {
     /// 是否处于文件浏览器模式
     pub in_file_browser: bool,
     
+    /// 文件管理器是否可见
+    pub file_manager_visible: bool,
+    
+    /// 文件管理器宽度
+    pub file_manager_width: u16,
+    
     /// 显示区域宽度
     pub screen_width: usize,
     
@@ -115,6 +123,7 @@ pub enum EditorMode {
     Command,
     Replace,
     Terminal,
+    FileManager,
 }
 
 /// 编辑器状态
@@ -419,6 +428,8 @@ impl Editor {
             status_message: None,
             file_browser: None,
             in_file_browser: false,
+            file_manager_visible: false,
+            file_manager_width: 30, // 默认宽度
             screen_width: 80,  // 默认宽度
             screen_height: 24, // 默认高度
             terminal: crate::terminal::Terminal::new(), // 初始化终端
@@ -679,6 +690,89 @@ impl Editor {
                     let buffer_idx = self.open_file(path)?;
                     // 在当前窗口中加载新打开的缓冲区
                     self.load_buffer_in_current_window(buffer_idx)?;
+                }
+            },
+            "file" => {
+                // 打开文件管理器
+                self.toggle_file_manager()?;
+            },
+            "newf" => {
+                // 新建文件
+                if parts.len() > 1 {
+                    if let Some(file_browser) = &mut self.file_browser {
+                        file_browser.create_file(parts[1])?;
+                        self.set_status_message(format!("已创建文件: {}", parts[1]), StatusMessageType::Success);
+                    } else {
+                        self.set_status_message("文件管理器未打开", StatusMessageType::Error);
+                    }
+                } else {
+                    self.set_status_message("请指定文件名", StatusMessageType::Error);
+                }
+            },
+            "newd" => {
+                // 新建目录
+                if parts.len() > 1 {
+                    if let Some(file_browser) = &mut self.file_browser {
+                        file_browser.create_directory(parts[1])?;
+                        self.set_status_message(format!("已创建目录: {}", parts[1]), StatusMessageType::Success);
+                    } else {
+                        self.set_status_message("文件管理器未打开", StatusMessageType::Error);
+                    }
+                } else {
+                    self.set_status_message("请指定目录名", StatusMessageType::Error);
+                }
+            },
+            "del" => {
+                // 删除选中的文件或目录
+                if let Some(file_browser) = &mut self.file_browser {
+                    let selected = file_browser.get_selected_entries();
+                    if selected.is_empty() {
+                        self.set_status_message("未选中任何文件或目录", StatusMessageType::Warning);
+                    } else {
+                        let count = selected.len();
+                        for entry in selected {
+                            if entry.path.file_name().unwrap_or_default() == ".." {
+                                continue; // 跳过上级目录
+                            }
+                            
+                            if entry.is_dir {
+                                std::fs::remove_dir_all(&entry.path)?;
+                            } else {
+                                std::fs::remove_file(&entry.path)?;
+                            }
+                        }
+                        file_browser.refresh()?;
+                        self.set_status_message(format!("已删除 {} 个项目", count), StatusMessageType::Success);
+                    }
+                } else {
+                    self.set_status_message("文件管理器未打开", StatusMessageType::Error);
+                }
+            },
+            "rname" => {
+                // 重命名选中的文件或目录
+                if parts.len() > 1 {
+                    if let Some(file_browser) = &mut self.file_browser {
+                        let selected = file_browser.get_selected_entries();
+                        if selected.len() == 1 {
+                            let entry = selected[0];
+                            if entry.path.file_name().unwrap_or_default() == ".." {
+                                self.set_status_message("不能重命名上级目录", StatusMessageType::Error);
+                            } else {
+                                let new_path = entry.path.parent().unwrap().join(parts[1]);
+                                std::fs::rename(&entry.path, &new_path)?;
+                                file_browser.refresh()?;
+                                self.set_status_message(format!("已重命名为: {}", parts[1]), StatusMessageType::Success);
+                            }
+                        } else if selected.is_empty() {
+                            self.set_status_message("未选中任何文件或目录", StatusMessageType::Warning);
+                        } else {
+                            self.set_status_message("只能重命名单个文件或目录", StatusMessageType::Warning);
+                        }
+                    } else {
+                        self.set_status_message("文件管理器未打开", StatusMessageType::Error);
+                    }
+                } else {
+                    self.set_status_message("请指定新名称", StatusMessageType::Error);
                 }
             },
             "tabnew" | "tabe" => {
@@ -1660,5 +1754,62 @@ impl Editor {
         }
         
         Ok(new_window_id)
+    }
+
+    /// 切换文件管理器显示状态
+    pub fn toggle_file_manager(&mut self) -> Result<()> {
+        if self.file_browser.is_none() {
+            let current_dir = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            
+            self.file_browser = Some(FileBrowser::new(Some(&current_dir))?);
+        }
+        
+        self.file_manager_visible = !self.file_manager_visible;
+        
+        if self.file_manager_visible {
+            self.mode = EditorMode::FileManager;
+            self.set_status_message("文件管理器已打开，使用空格键选择文件，Esc键退出", StatusMessageType::Info);
+        } else {
+            self.mode = EditorMode::Normal;
+            self.set_status_message("文件管理器已关闭", StatusMessageType::Info);
+        }
+        
+        Ok(())
+    }
+    
+    /// 处理文件管理器的按键输入
+    pub fn handle_file_manager_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if let Some(file_browser) = &mut self.file_browser {
+            let key_str = key_event_to_str(key);
+            
+            match key.code {
+                KeyCode::Esc => {
+                    self.file_manager_visible = false;
+                    self.mode = EditorMode::Normal;
+                    self.set_status_message("已退出文件管理器", StatusMessageType::Info);
+                    return Ok(true);
+                },
+                KeyCode::Enter => {
+                    // 打开选中的文件
+                    if let Some(item) = file_browser.selected() {
+                        if !item.is_dir {
+                            self.open_file(&item.path)?;
+                            return Ok(true);
+                        } else {
+                            // 进入目录
+                            file_browser.enter_directory(&item.path)?;
+                            return Ok(true);
+                        }
+                    }
+                },
+                _ => {
+                    // 其他按键交给文件浏览器处理
+                    return file_browser.handle_key(&key_str);
+                }
+            }
+        }
+        
+        Ok(false)
     }
 }

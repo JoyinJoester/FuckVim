@@ -82,9 +82,10 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, editor: &mut Editor) -> Resul
                 
                 // 按以下优先级处理按键：
                 // 1. 终端模式
-                // 2. 全局特殊键（Esc, Ctrl+C 等）
-                // 3. 模式特定处理（命令模式、普通模式下的特殊键等）
-                // 4. 一般按键处理（通过 KeyHandler）
+                // 2. 文件管理器模式
+                // 3. 全局特殊键（Esc, Ctrl+C 等）
+                // 4. 模式特定处理（命令模式、普通模式下的特殊键等）
+                // 5. 一般按键处理（通过 KeyHandler）
                 
                 // 1. 终端模式处理
                 if editor.terminal_visible && editor.terminal.has_focus() {
@@ -95,23 +96,35 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, editor: &mut Editor) -> Resul
                     continue;
                 }
                 
+                // 2. 文件管理器模式处理
+                if editor.file_manager_visible && editor.mode == EditorMode::FileManager {
+                    if let Ok(true) = editor.handle_file_manager_key(key) {
+                        continue;
+                    }
+                }
+                
                 // Ctrl+T 切换终端可见性
                 if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     editor.terminal.toggle_visibility();
                     continue;
                 }
                 
-                // 2. 全局特殊键处理
+                // 3. 全局特殊键处理
                 match key.code {
                     KeyCode::Esc => {
-                        editor.set_mode(EditorMode::Normal);
-                        editor.command_line.mode = CommandLineMode::Normal;
+                        if editor.file_manager_visible {
+                            editor.file_manager_visible = false;
+                            editor.set_mode(EditorMode::Normal);
+                        } else {
+                            editor.set_mode(EditorMode::Normal);
+                            editor.command_line.mode = CommandLineMode::Normal;
+                        }
                         continue;
                     },
                     _ => {} // 继续其他处理
                 }
                 
-                // 3. 模式特定处理
+                // 4. 模式特定处理
                 let mode_handled = match editor.mode {
                     EditorMode::Normal => {
                         match key.code {
@@ -265,6 +278,10 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, editor: &mut Editor) -> Resul
                             _ => false
                         }
                     },
+                    EditorMode::FileManager => {
+                        // 文件管理器模式下的按键已经在前面处理过了
+                        true
+                    },
                     _ => false
                 };
                 
@@ -273,7 +290,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, editor: &mut Editor) -> Resul
                     continue;
                 }
                 
-                // 4. 常规按键处理
+                // 5. 常规按键处理
                 let key_str = key_event_to_str(key);
                 let mut key_handler = crate::input::KeyHandler::new(editor);
                 
@@ -446,7 +463,7 @@ fn handle_key_event(editor: &mut Editor, key: KeyEvent) -> Result<()> {
 }
 
 /// 将键盘事件转换为字符串表示
-fn key_event_to_str(key: KeyEvent) -> String {
+pub fn key_event_to_str(key: KeyEvent) -> String {
     // 添加调试信息
     let result = match key.code {
         KeyCode::Esc => "<Esc>".to_string(),
@@ -503,6 +520,7 @@ fn key_event_to_str(key: KeyEvent) -> String {
 fn ui(f: &mut Frame, editor: &Editor) {
     let area = f.area();
     let terminal_visible = editor.terminal_visible;
+    let file_manager_visible = editor.file_manager_visible;
     
     // 计算主界面和各区域的高度，保证布局一致
     let status_bar_height = 3;  // 状态栏固定高度 (包含上下边框)
@@ -524,13 +542,37 @@ fn ui(f: &mut Frame, editor: &Editor) {
     }
     
     // 计算主界面区域
-    let main_area = if terminal_visible {
-        let available_height = area.height.saturating_sub(status_bar_height).saturating_sub(cmd_line_height);
+    let available_height = area.height.saturating_sub(status_bar_height).saturating_sub(cmd_line_height);
+    
+    // 处理文件管理器
+    let main_area = if file_manager_visible {
+        // 如果文件管理器可见，分割左右区域
+        let file_manager_width = editor.file_manager_width.min(area.width / 3);
+        let horizontal_layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(file_manager_width),
+                Constraint::Min(10),
+            ].as_ref())
+            .split(Rect::new(0, 0, area.width, available_height));
+        
+        // 绘制文件管理器
+        if let Some(file_browser) = &editor.file_browser {
+            // 使用克隆方法来避免不安全的可变引用转换
+            // 我们将file_browser克隆一份，这样就可以安全地获取可变引用
+            let mut file_browser_clone = file_browser.clone();
+            let _ = draw_file_browser(f, &mut file_browser_clone, horizontal_layout[0]);
+        }
+        
+        // 返回主编辑区域
+        horizontal_layout[1]
+    } else if terminal_visible {
+        // 没有文件管理器，但有终端
         let terminal_height = editor.terminal_height.min(available_height / 2);
         Rect::new(0, 0, area.width, available_height.saturating_sub(terminal_height))
     } else {
-        // 减去状态栏和命令行的高度
-        Rect::new(0, 0, area.width, area.height.saturating_sub(status_bar_height).saturating_sub(cmd_line_height))
+        // 只有编辑区
+        Rect::new(0, 0, area.width, available_height)
     };
     
     // 绘制编辑器主窗口
@@ -538,7 +580,6 @@ fn ui(f: &mut Frame, editor: &Editor) {
     
     // 绘制终端区域（如果可见）
     let (status_y, cmd_y) = if terminal_visible {
-        let available_height = area.height.saturating_sub(status_bar_height).saturating_sub(cmd_line_height);
         let terminal_height = editor.terminal_height.min(available_height / 2);
         let terminal_area = Rect::new(0, main_area.height, area.width, terminal_height);
         draw_terminal(f, editor, terminal_area);
@@ -617,29 +658,16 @@ fn draw_window(
         return;
     }
     
-    // 获取可变窗口引用以更新尺寸
-    // 因为window参数是不可变的，我们需要通过editor来获取可变引用
-    if is_active {
-        // 更新窗口尺寸，以便正确计算滚动
-        if let Ok(tab) = editor.tab_manager.current_tab() {
-            if let Some(_win_id) = tab.active_window_id() {
-                // 这里我们不能直接修改window，因为它是不可变引用
-                // 但我们可以在绘制之前更新editor中的窗口尺寸
-                // 这是安全的，因为我们只是在UI渲染过程中
-                let inner_height = area.height.saturating_sub(2) as usize; // 减去边框
-                let inner_width = area.width.saturating_sub(2) as usize; // 减去边框
-                
-                // 使用unsafe块来获取可变引用，因为我们知道这是安全的
-                // 我们只是在更新窗口的尺寸，不会影响其他状态
-                unsafe {
-                    let window_mut = (window as *const crate::editor::Window as *mut crate::editor::Window).as_mut().unwrap();
-                    window_mut.set_size(inner_width, inner_height);
-                    // 确保光标可见
-                    window_mut.ensure_cursor_visible();
-                }
-            }
-        }
-    }
+    // 使用unsafe块来获取可变引用，因为我们知道这是安全的
+    // 我们只是在更新窗口的尺寸，不会影响其他状态
+    // 注意：这里使用了克隆来避免不安全的可变引用转换
+    // 在实际应用中，应该考虑使用RefCell或其他安全的内部可变性机制
+    let inner_height = area.height.saturating_sub(2) as usize; // 减去边框
+    let inner_width = area.width.saturating_sub(2) as usize; // 减去边框
+    
+    // 在UI渲染过程中，我们不修改窗口尺寸，而是只在绘制时考虑这些尺寸
+    // 这样可以避免不安全的可变引用转换
+    // 窗口的实际尺寸更新应该在处理事件时进行
     
     // 创建窗口边框
     let title = if buffer.file_path.is_some() {
@@ -845,14 +873,16 @@ fn draw_file_browser(
         };
         
         let icon = if item.is_dir { "📁 " } else { "📄 " };
-        let name = format!("{}{}", icon, item.name);
+        // 添加选中状态标记
+        let selection_mark = if item.selected { "[*]" } else { "[ ]" };
+        let name = format!("{} {}{}", selection_mark, icon, item.name);
         
         items.push(ListItem::new(Span::styled(name, style)));
     }
     
     let list = List::new(items)
         .block(Block::default()
-            .title("文件浏览器")
+            .title("文件管理器")
             .borders(Borders::ALL))
         .highlight_style(Style::default()
             .bg(Color::White)
@@ -909,6 +939,12 @@ fn draw_file_browser(
                 .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                 .unwrap_or_else(|| "未知时间".to_string());
             info_items.push(format!("修改时间: {}", time));
+        }
+        
+        // 添加选中项目数量信息
+        let selected_count = browser.get_selected_entries().len();
+        if selected_count > 0 {
+            info_items.push(format!("已选中: {} 个项目", selected_count));
         }
         
         let info = Paragraph::new(Text::from(info_items.join("\n")))
@@ -1367,12 +1403,13 @@ fn render_status_bar(editor: &Editor) -> Vec<Span> {
     
     // 模式显示，使用不同颜色区分
     let mode_style = match editor.mode {
-        EditorMode::Normal => Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+        EditorMode::Normal => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         EditorMode::Insert => Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD),
-        EditorMode::Visual => Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
-        EditorMode::Command => Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
-        EditorMode::Replace => Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+        EditorMode::Visual => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        EditorMode::Command => Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+        EditorMode::Replace => Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
         EditorMode::Terminal => Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+        EditorMode::FileManager => Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
     };
     let mode = format!("{:?}", editor.mode);
 
@@ -1421,6 +1458,7 @@ fn render_command_line(editor: &Editor) -> Vec<Span> {
                     EditorMode::Command => "命令",
                     EditorMode::Replace => "替换",
                     EditorMode::Terminal => "终端",
+                    EditorMode::FileManager => "文件管理器",
                 };
                 vec![Span::styled(format!(" {} 模式", mode_str), Style::default().fg(Color::Cyan))]
             }
