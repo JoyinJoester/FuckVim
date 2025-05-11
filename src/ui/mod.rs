@@ -55,6 +55,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, editor: &mut Editor) -> Resul
     editor.set_mode(EditorMode::Normal);
     
     loop {
+        // 同步终端输出
+        if editor.terminal_visible && editor.terminal_initialized {
+            let _ = editor.terminal.sync_output();
+        }
+        
         // 绘制UI
         terminal.draw(|f| ui(f, editor))?;
         
@@ -617,7 +622,7 @@ fn draw_window(
     if is_active {
         // 更新窗口尺寸，以便正确计算滚动
         if let Ok(tab) = editor.tab_manager.current_tab() {
-            if let Some(win_id) = tab.active_window_id() {
+            if let Some(_win_id) = tab.active_window_id() {
                 // 这里我们不能直接修改window，因为它是不可变引用
                 // 但我们可以在绘制之前更新editor中的窗口尺寸
                 // 这是安全的，因为我们只是在UI渲染过程中
@@ -1111,8 +1116,13 @@ fn draw_terminal(f: &mut Frame, editor: &Editor, area: Rect) {
     
     // 创建文本内容
     let mut spans_vec = Vec::new();
+    
+    // 解析终端输出中的ANSI转义序列
     for line in terminal_lines {
-        spans_vec.push(Line::from(line));
+        // 将ANSI转义序列转换为样式
+        let line_owned = line.clone(); // 创建一个拥有所有权的副本
+        let styled_line = parse_ansi_sequences(&line_owned);
+        spans_vec.push(Line::from(styled_line));
     }
     
     // 渲染终端内容
@@ -1124,16 +1134,133 @@ fn draw_terminal(f: &mut Frame, editor: &Editor, area: Rect) {
     
     // 如果终端模式激活，设置光标
     if editor.mode == EditorMode::Terminal {
-        if let Some(active_session) = editor.terminal.get_active_session() {
-            let (cursor_x, cursor_y) = active_session.get_cursor_position();
-            if cursor_y < inner_area.height as usize {
-                f.set_cursor_position((
-                    inner_area.x + cursor_x as u16,
-                    inner_area.y + cursor_y as u16
-                ));
+        let (cursor_x, cursor_y) = editor.terminal.get_cursor_position();
+        // 确保光标位置在可见区域内
+        if cursor_y < inner_area.height as usize {
+            f.set_cursor_position((
+                inner_area.x + cursor_x as u16,
+                inner_area.y + cursor_y as u16
+            ));
+        }
+    }
+}
+
+/// 解析ANSI转义序列并转换为样式化的Span
+fn parse_ansi_sequences(text: &str) -> Vec<Span<'static>> {
+    let mut result = Vec::new();
+    let mut current_text = String::new();
+    let mut current_style = Style::default();
+    let mut in_escape = false;
+    let mut escape_seq = String::new();
+    
+    for c in text.chars() {
+        if in_escape {
+            escape_seq.push(c);
+            
+            // 检查转义序列是否结束
+            if c == 'm' {
+                // 处理完整的转义序列
+                if !current_text.is_empty() {
+                    let text_owned: String = current_text.clone();
+                    result.push(Span::styled(text_owned, current_style));
+                    current_text.clear();
+                }
+                
+                // 解析转义序列并更新样式
+                current_style = parse_ansi_style(&escape_seq, current_style);
+                
+                in_escape = false;
+                escape_seq.clear();
+            }
+        } else if c == '\x1B' {
+            // 开始一个新的转义序列
+            if !current_text.is_empty() {
+                let text_owned: String = current_text.clone();
+                result.push(Span::styled(text_owned, current_style));
+                current_text.clear();
+            }
+            
+            in_escape = true;
+            escape_seq.push(c);
+        } else {
+            current_text.push(c);
+        }
+    }
+    
+    // 添加最后的文本
+    if !current_text.is_empty() {
+        let text_owned: String = current_text;
+        result.push(Span::styled(text_owned, current_style));
+    }
+    
+    // 如果结果为空，返回一个空的Span
+    if result.is_empty() {
+        result.push(Span::raw(String::from("")));
+    }
+    
+    result
+}
+
+/// 解析ANSI样式转义序列并返回相应的Style
+fn parse_ansi_style(escape_seq: &str, mut current_style: Style) -> Style {
+    // 检查是否是颜色重置序列
+    if escape_seq == "\x1B[0m" || escape_seq == "\x1B[m" {
+        return Style::default();
+    }
+    
+    // 提取参数
+    if let Some(params_str) = escape_seq.strip_prefix("\x1B[").and_then(|s| s.strip_suffix('m')) {
+        let params: Vec<&str> = params_str.split(';').collect();
+        
+        for param in params {
+            if let Ok(code) = param.parse::<u8>() {
+                match code {
+                    0 => current_style = Style::default(), // 重置
+                    1 => current_style = current_style.add_modifier(Modifier::BOLD),
+                    2 => current_style = current_style.add_modifier(Modifier::DIM),
+                    3 => current_style = current_style.add_modifier(Modifier::ITALIC),
+                    4 => current_style = current_style.add_modifier(Modifier::UNDERLINED),
+                    5 => current_style = current_style.add_modifier(Modifier::SLOW_BLINK),
+                    7 => current_style = current_style.add_modifier(Modifier::REVERSED),
+                    30 => current_style = current_style.fg(Color::Black),
+                    31 => current_style = current_style.fg(Color::Red),
+                    32 => current_style = current_style.fg(Color::Green),
+                    33 => current_style = current_style.fg(Color::Yellow),
+                    34 => current_style = current_style.fg(Color::Blue),
+                    35 => current_style = current_style.fg(Color::Magenta),
+                    36 => current_style = current_style.fg(Color::Cyan),
+                    37 => current_style = current_style.fg(Color::Gray),
+                    40 => current_style = current_style.bg(Color::Black),
+                    41 => current_style = current_style.bg(Color::Red),
+                    42 => current_style = current_style.bg(Color::Green),
+                    43 => current_style = current_style.bg(Color::Yellow),
+                    44 => current_style = current_style.bg(Color::Blue),
+                    45 => current_style = current_style.bg(Color::Magenta),
+                    46 => current_style = current_style.bg(Color::Cyan),
+                    47 => current_style = current_style.bg(Color::Gray),
+                    90 => current_style = current_style.fg(Color::DarkGray),
+                    91 => current_style = current_style.fg(Color::LightRed),
+                    92 => current_style = current_style.fg(Color::LightGreen),
+                    93 => current_style = current_style.fg(Color::LightYellow),
+                    94 => current_style = current_style.fg(Color::LightBlue),
+                    95 => current_style = current_style.fg(Color::LightMagenta),
+                    96 => current_style = current_style.fg(Color::LightCyan),
+                    97 => current_style = current_style.fg(Color::White),
+                    100 => current_style = current_style.bg(Color::DarkGray),
+                    101 => current_style = current_style.bg(Color::LightRed),
+                    102 => current_style = current_style.bg(Color::LightGreen),
+                    103 => current_style = current_style.bg(Color::LightYellow),
+                    104 => current_style = current_style.bg(Color::LightBlue),
+                    105 => current_style = current_style.bg(Color::LightMagenta),
+                    106 => current_style = current_style.bg(Color::LightCyan),
+                    107 => current_style = current_style.bg(Color::White),
+                    _ => {} // 忽略不支持的代码
+                }
             }
         }
     }
+    
+    current_style
 }
 
 /// 获取当前行的语法高亮信息

@@ -806,13 +806,13 @@ impl Editor {
                     return Err(FKVimError::CommandError("请指定搜索文本".to_string()));
                 }
             },
-            "toggleterm" => {
+            "toggleterm" | "term" => {
                 self.toggle_terminal()?;
             },
-            "focusterm" => {
+            "focusterm" | "winter" => {
                 self.focus_terminal()?;
             },
-            "exitterm" => {
+            "exitterm" | "exitter" => {
                 self.exit_terminal_focus()?;
             },
             "sendterm" => {
@@ -826,7 +826,7 @@ impl Editor {
             "clearterm" => {
                 self.clear_terminal()?;
             },
-            "restartterm" | "restart_terminal" => {
+            "restartterm" | "restart_terminal" | "rester" => {
                 self.restart_terminal()?;
             },
             _ => {
@@ -1352,8 +1352,59 @@ impl Editor {
         self.terminal_visible = !self.terminal_visible;
         
         if self.terminal_visible && !self.terminal_initialized {
-            self.terminal.init()?;
-            self.terminal_initialized = true;
+            // 获取当前文件所在目录作为终端的工作目录
+            let current_dir = if let Ok(buffer) = self.current_buffer() {
+                if let Some(file_path) = &buffer.file_path {
+                    if let Some(parent) = file_path.parent() {
+                        if parent.exists() && parent.is_dir() {
+                            Some(parent.to_path_buf())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            
+            // 如果没有获取到当前文件目录，则使用项目根目录或当前工作目录
+            let working_dir = if current_dir.is_none() {
+                std::env::current_dir().ok()
+            } else {
+                current_dir
+            };
+            
+            // 初始化终端，传入当前目录
+            match self.terminal.init_with_dir(working_dir) {
+                Ok(_) => {
+                    // 设置终端高度
+                    self.terminal.set_height(Some(self.terminal_height));
+                    // 标记为已初始化
+                    self.terminal_initialized = true;
+                    
+                    // 添加状态消息
+                    self.set_status_message("终端已启动，使用Esc键退出终端模式", StatusMessageType::Info);
+                },
+                Err(e) => {
+                    // 初始化失败，设置错误消息并保持终端不可见
+                    self.terminal_visible = false;
+                    self.set_status_message(format!("终端初始化失败: {}", e), StatusMessageType::Error);
+                    return Err(e);
+                }
+            }
+        }
+        
+        // 如果终端可见，自动切换到终端模式
+        if self.terminal_visible {
+            self.mode = EditorMode::Terminal;
+            self.terminal.focus();
+        } else if self.mode == EditorMode::Terminal {
+            // 如果终端不可见但处于终端模式，切换回普通模式
+            self.mode = EditorMode::Normal;
         }
         
         Ok(())
@@ -1363,10 +1414,11 @@ impl Editor {
     pub fn focus_terminal(&mut self) -> Result<()> {
         if !self.terminal_visible {
             self.toggle_terminal()?;
+        } else {
+            self.terminal.focus();
+            self.mode = EditorMode::Terminal;
         }
         
-        self.terminal.focus();
-        self.mode = EditorMode::Terminal;
         Ok(())
     }
     
@@ -1374,13 +1426,43 @@ impl Editor {
     pub fn exit_terminal_focus(&mut self) -> Result<()> {
         self.terminal.unfocus();
         self.mode = EditorMode::Normal;
+        
+        // 同步终端输出
+        self.terminal.sync_output()?;
+        
         Ok(())
     }
     
     /// 向终端发送命令
     pub fn send_to_terminal(&mut self, cmd: &str) -> Result<()> {
         if !self.terminal_initialized {
-            self.terminal.init()?;
+            // 获取当前文件所在目录作为终端的工作目录
+            let current_dir = if let Ok(buffer) = self.current_buffer() {
+                if let Some(file_path) = &buffer.file_path {
+                    if let Some(parent) = file_path.parent() {
+                        Some(parent.to_path_buf())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            
+            // 如果没有获取到当前文件目录，则使用项目根目录或当前工作目录
+            let working_dir = if current_dir.is_none() {
+                std::env::current_dir().ok()
+            } else {
+                current_dir
+            };
+            
+            // 初始化终端，传入当前目录
+            self.terminal.init_with_dir(working_dir)?;
+            
+            // 设置终端高度
+            self.terminal.set_height(Some(self.terminal_height));
             self.terminal_initialized = true;
         }
         
@@ -1390,6 +1472,9 @@ impl Editor {
             self.toggle_terminal()?;
         }
         
+        // 确保输出同步显示
+        self.terminal.sync_output()?;
+        
         Ok(())
     }
     
@@ -1397,6 +1482,9 @@ impl Editor {
     pub fn clear_terminal(&mut self) -> Result<()> {
         if self.terminal_initialized {
             self.terminal.clear();
+            self.set_status_message("终端已清空", StatusMessageType::Info);
+        } else {
+            self.set_status_message("终端未初始化", StatusMessageType::Warning);
         }
         
         Ok(())
@@ -1406,6 +1494,10 @@ impl Editor {
     pub fn restart_terminal(&mut self) -> Result<()> {
         if self.terminal_initialized {
             self.terminal.restart()?;
+            self.set_status_message("终端已重启", StatusMessageType::Info);
+        } else {
+            // 如果终端未初始化，则初始化它
+            self.toggle_terminal()?;
         }
         
         Ok(())
