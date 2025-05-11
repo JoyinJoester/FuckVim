@@ -7,7 +7,9 @@
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
 > 🚀 一个使用rust写的vim类软件
+
 > 支持系统：linux，理论上rust构建是都可以跑的，但是我在我的win本上测试出现了一些小问题，我也没有别的设备进行测试，所以默认只支持linux了
+
 > 此项目使用ai进行代码审查，毕竟实在太方便了
 
 ## 📋 功能概览
