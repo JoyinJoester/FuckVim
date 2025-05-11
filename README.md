@@ -9,7 +9,7 @@
 
 ## 📋 功能概览
 
-FKVim 是一个基于 Rust 构建的现代化文本编辑器，旨在提供 Vim/Neovim 的强大功能，同时融合现代编辑器的用户体验和更友好的界面：
+FVim 是一个基于 Rust 构建的现代化文本编辑器，旨在提供 Vim/Neovim 的强大功能，同时融合现代编辑器的用户体验和更友好的界面：
 
 - ⚡ **高性能** - 基于 Rust 构建，启动迅速，即使处理大文件也能保持流畅
 - 🔍 **强大的编辑能力** - 保留 Vim 的模态编辑和快捷键理念
@@ -44,19 +44,37 @@ cargo build --release
 cargo install --path .
 ```
 
+#### 手动安装
+
+您也可以通过手动复制二进制文件的方式安装：
+
+```bash
+# 从 Releases 页面下载并解压二进制文件
+# 或者从源码编译得到二进制文件（位于 target/release/fvim）
+
+# 复制二进制文件到系统路径
+sudo cp target/release/fvim /usr/local/bin/
+
+# 设置可执行权限
+sudo chmod +x /usr/local/bin/fvim
+
+# 验证安装
+fvim --version
+```
+
 ### 基本用法
 
 #### 启动编辑器
 
 ```bash
 # 打开编辑器
-fkvim
+fvim
 
 # 打开指定文件
-fkvim path/to/file.txt
+fvim path/to/file.txt
 
 # 打开多个文件
-fkvim file1.txt file2.txt
+fvim file1.txt file2.txt
 ```
 
 #### 基本模式
@@ -74,17 +92,26 @@ fkvim file1.txt file2.txt
 | `:w` | 保存 |
 | `:wq` 或 `:x` | 保存并退出 |
 | `:e <文件>` | 编辑文件 |
-| `:help` | 显示帮助 |//待补全
+| `:help` | 显示帮助 |
 | `:split` 或 `:sp` | 水平分割窗口 |
 | `:vsplit` 或 `:vs` | 垂直分割窗口 |
-| `:tabnew` 或 `:tabe` | 新建标签页 |//待补全
+| `:close` 或 `:clo` | 关闭当前窗口 |
+| `:only` | 只保留当前窗口，关闭其他窗口 |
+| `:wnext` | 切换到下一个窗口 |
+| `:win h` | 切换到左侧窗口 |
+| `:win j` | 切换到下方窗口 |
+| `:win k` | 切换到上方窗口 |
+| `:win l` | 切换到右侧窗口 |
+| `:win w` | 切换到下一个窗口 |
+| `:win W` | 切换到上一个窗口 |
+| `:tabnew` 或 `:tabe` | 新建标签页 |
 
 ## ⚙️ 配置
 
-FKVim 使用 Lua 进行配置，配置文件位于：
+FVim 使用 Lua 进行配置，配置文件位于：
 
-- **Linux/macOS**: `~/.config/fkvim/config.lua`
-- **Windows**: `%USERPROFILE%\.config\fkvim\config.lua`
+- **Linux/macOS**: `~/.config/fvim/config.lua`
+- **Windows**: `%USERPROFILE%\.config\fvim\config.lua`
 
 ### 示例配置
 
@@ -121,12 +148,12 @@ require('plugins').setup {
 
 插件可以放置在以下目录：
 
-- **Linux/macOS**: `~/.local/share/fkvim/plugins/`
-- **Windows**: `%USERPROFILE%\.local\share\fkvim\plugins\`
+- **Linux/macOS**: `~/.local/share/fvim/plugins/`
+- **Windows**: `%USERPROFILE%\.local\share\fvim\plugins\`
 
 ### 创建插件
 
-FKVim 插件使用 Lua 编写。一个基本的插件结构如下：
+FVim 插件使用 Lua 编写。一个基本的插件结构如下：
 
 ```lua
 -- myplugin.lua
@@ -175,17 +202,19 @@ return M
 | `Ctrl+r` | 重做 |
 
 ### 窗口管理
-//待补全
+
 | 快捷键 | 功能 |
 |--------|------|
 | `Ctrl+w` + `h/j/k/l` | 在窗口间移动 |
+| `Ctrl+w` + `w` | 切换到下一个窗口 |
+| `Ctrl+w` + `W` | 切换到上一个窗口 |
 | `Ctrl+w` + `s` | 水平分割窗口 |
 | `Ctrl+w` + `v` | 垂直分割窗口 |
 | `Ctrl+w` + `c` | 关闭当前窗口 |
 | `Ctrl+w` + `o` | 关闭其他窗口 |
 
 ### 终端集成
-//待补全
+
 | 命令 | 功能 |
 |------|------|
 | `:toggleterm` | 切换终端可见性 |
@@ -207,11 +236,11 @@ return M
 
 ## 📄 许可证
 
-FKVim 基于 [MIT 许可证](LICENSE) 发布。
+FVim 基于 [MIT 许可证](LICENSE) 发布。
 
 ## 👥 致谢
 
-FKVim 的开发受到了以下项目的启发：
+FVim 的开发受到了以下项目的启发：
 
 - [Neovim](https://neovim.io/)
 - [Helix Editor](https://helix-editor.com/)

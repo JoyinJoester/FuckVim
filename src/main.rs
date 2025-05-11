@@ -33,8 +33,18 @@ fn run() -> Result<()> {
     
     // 如果有文件参数，尝试打开文件
     if args.len() > 1 {
-        let file_path = Path::new(&args[1]);
-        editor.open_file(file_path)?;
+        // 打开第一个文件
+        let first_file_path = Path::new(&args[1]);
+        editor.open_file(first_file_path)?;
+        
+        // 如果有多个文件，以水平分割窗口的方式打开其余文件
+        for arg in args.iter().skip(2) {
+            let file_path = Path::new(arg);
+            // 打开文件并获取缓冲区索引
+            let buffer_idx = editor.open_file_to_buffer(file_path)?;
+            // 水平分割窗口并在新窗口中显示该文件
+            editor.split_window_horizontal_with_buffer(buffer_idx)?;
+        }
     }
     
     // 启动 UI

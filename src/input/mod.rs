@@ -97,7 +97,7 @@ impl KeyHandler {
         
         // 处理不同的按键
         match key {
-            "i" => Ok(InputAction::SwitchMode(EditorMode::Insert)),
+            "i" | "<Insert>" => Ok(InputAction::SwitchMode(EditorMode::Insert)),
             "I" => {
                 // 移动到行首并进入插入模式
                 Ok(InputAction::SwitchMode(EditorMode::Insert))
@@ -167,10 +167,16 @@ impl KeyHandler {
             },
             
             // 窗口操作
-            "<C-w>h" | "<C-w><Left>" => Ok(InputAction::ExecuteCommand("wincmd h".to_string())),
-            "<C-w>j" | "<C-w><Down>" => Ok(InputAction::ExecuteCommand("wincmd j".to_string())),
-            "<C-w>k" | "<C-w><Up>" => Ok(InputAction::ExecuteCommand("wincmd k".to_string())),
-            "<C-w>l" | "<C-w><Right>" => Ok(InputAction::ExecuteCommand("wincmd l".to_string())),
+            "<C-w>h" | "<C-w><Left>" => Ok(InputAction::ExecuteCommand("win h".to_string())),
+            "<C-w>j" | "<C-w><Down>" => Ok(InputAction::ExecuteCommand("win j".to_string())),
+            "<C-w>k" | "<C-w><Up>" => Ok(InputAction::ExecuteCommand("win k".to_string())),
+            "<C-w>l" | "<C-w><Right>" => Ok(InputAction::ExecuteCommand("win l".to_string())),
+            "<C-w>w" => Ok(InputAction::ExecuteCommand("win w".to_string())),
+            "<C-w>W" => Ok(InputAction::ExecuteCommand("win W".to_string())),
+            "<C-w>s" => Ok(InputAction::ExecuteCommand("split".to_string())),
+            "<C-w>v" => Ok(InputAction::ExecuteCommand("vsplit".to_string())),
+            "<C-w>c" => Ok(InputAction::ExecuteCommand("close".to_string())),
+            "<C-w>o" => Ok(InputAction::ExecuteCommand("only".to_string())),
             
             // 查找操作
             "/" => Ok(InputAction::ExecuteCommand("search".to_string())),
@@ -198,6 +204,7 @@ impl KeyHandler {
         // 对于特殊按键的单独处理
         match key {
             "<Esc>" => Ok(InputAction::SwitchMode(EditorMode::Normal)),
+            "<Insert>" => Ok(InputAction::SwitchMode(EditorMode::Replace)),
             "<CR>" => {
                 // 回车键，插入换行符
                 Ok(InputAction::Insert("\n".to_string()))
@@ -337,6 +344,7 @@ impl KeyHandler {
     fn handle_replace_key(&mut self, key: &str) -> Result<InputAction> {
         match key {
             "<Esc>" => Ok(InputAction::SwitchMode(EditorMode::Normal)),
+            "<Insert>" => Ok(InputAction::SwitchMode(EditorMode::Insert)),
             // 其他按键作为替换输入
             _ => {
                 if key.len() == 1 {

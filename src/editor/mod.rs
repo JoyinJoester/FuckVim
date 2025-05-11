@@ -709,7 +709,15 @@ impl Editor {
                 // 关闭当前窗口
                 self.close_current_window()?;
             },
-            "winc" | "wincmd" => {
+            "only" => {
+                // 只保留当前窗口
+                self.only_current_window()?;
+            },
+            "wnext" => {
+                // 切换到下一个窗口
+                self.next_window()?;
+            },
+            "winc" | "wincmd" | "win" => {
                 if parts.len() > 1 {
                     match parts[1] {
                         "h" => {
@@ -973,10 +981,40 @@ impl Editor {
         Err(FKVimError::EditorError("无法关闭当前窗口".to_string()))
     }
     
+    /// 关闭除当前窗口外的所有窗口
+    pub fn only_current_window(&mut self) -> Result<()> {
+        if let Ok(tab) = self.tab_manager.current_tab_mut() {
+            let active_window_id = tab.active_window_id()
+                .ok_or_else(|| FKVimError::EditorError("没有活动窗口".to_string()))?;
+            
+            // 获取所有窗口ID
+            let window_ids: Vec<WindowId> = tab.get_window_ids();
+            
+            // 保留当前窗口，关闭其他所有窗口
+            for window_id in window_ids {
+                if window_id != active_window_id {
+                    tab.remove_window(window_id)?;
+                }
+            }
+            
+            // 更新布局
+            tab.layout = window::Layout::Single;
+            
+            return Ok(());
+        }
+        
+        Err(FKVimError::EditorError("无法执行only命令".to_string()))
+    }
+    
     /// 焦点移动到左侧窗口
     pub fn focus_left_window(&mut self) -> Result<()> {
         if let Ok(tab) = self.tab_manager.current_tab_mut() {
-            tab.focus_left()
+            let result = tab.focus_left();
+            if result.is_ok() {
+                // 更新当前缓冲区
+                self.sync_current_buffer_with_active_window()?;
+            }
+            result
         } else {
             Err(FKVimError::EditorError("无法切换到左侧窗口".to_string()))
         }
@@ -985,7 +1023,12 @@ impl Editor {
     /// 焦点移动到下方窗口
     pub fn focus_down_window(&mut self) -> Result<()> {
         if let Ok(tab) = self.tab_manager.current_tab_mut() {
-            tab.focus_down()
+            let result = tab.focus_down();
+            if result.is_ok() {
+                // 更新当前缓冲区
+                self.sync_current_buffer_with_active_window()?;
+            }
+            result
         } else {
             Err(FKVimError::EditorError("无法切换到下方窗口".to_string()))
         }
@@ -994,7 +1037,12 @@ impl Editor {
     /// 焦点移动到上方窗口
     pub fn focus_up_window(&mut self) -> Result<()> {
         if let Ok(tab) = self.tab_manager.current_tab_mut() {
-            tab.focus_up()
+            let result = tab.focus_up();
+            if result.is_ok() {
+                // 更新当前缓冲区
+                self.sync_current_buffer_with_active_window()?;
+            }
+            result
         } else {
             Err(FKVimError::EditorError("无法切换到上方窗口".to_string()))
         }
@@ -1003,7 +1051,12 @@ impl Editor {
     /// 焦点移动到右侧窗口
     pub fn focus_right_window(&mut self) -> Result<()> {
         if let Ok(tab) = self.tab_manager.current_tab_mut() {
-            tab.focus_right()
+            let result = tab.focus_right();
+            if result.is_ok() {
+                // 更新当前缓冲区
+                self.sync_current_buffer_with_active_window()?;
+            }
+            result
         } else {
             Err(FKVimError::EditorError("无法切换到右侧窗口".to_string()))
         }
@@ -1012,7 +1065,12 @@ impl Editor {
     /// 切换到下一个窗口
     pub fn next_window(&mut self) -> Result<()> {
         if let Ok(tab) = self.tab_manager.current_tab_mut() {
-            tab.next_window()
+            let result = tab.next_window();
+            if result.is_ok() {
+                // 更新当前缓冲区
+                self.sync_current_buffer_with_active_window()?;
+            }
+            result
         } else {
             Err(FKVimError::EditorError("无法切换到下一个窗口".to_string()))
         }
@@ -1021,10 +1079,35 @@ impl Editor {
     /// 切换到上一个窗口
     pub fn prev_window(&mut self) -> Result<()> {
         if let Ok(tab) = self.tab_manager.current_tab_mut() {
-            tab.prev_window()
+            let result = tab.prev_window();
+            if result.is_ok() {
+                // 更新当前缓冲区
+                self.sync_current_buffer_with_active_window()?;
+            }
+            result
         } else {
             Err(FKVimError::EditorError("无法切换到上一个窗口".to_string()))
         }
+    }
+    
+    /// 同步当前缓冲区与活动窗口
+    fn sync_current_buffer_with_active_window(&mut self) -> Result<()> {
+        if let Ok(tab) = self.tab_manager.current_tab() {
+            if let Ok(window) = tab.active_window() {
+                let buffer_id = window.buffer_id();
+                if buffer_id < self.buffers.len() {
+                    self.current_buffer = buffer_id;
+                    
+                    // 同时更新光标位置
+                    self.cursor_line = window.cursor_line;
+                    self.cursor_col = window.cursor_col;
+                    
+                    return Ok(());
+                }
+            }
+        }
+        
+        Err(FKVimError::EditorError("无法同步缓冲区与活动窗口".to_string()))
     }
     
     /// 格式化缓冲区列表
@@ -1448,5 +1531,42 @@ impl Editor {
         content.push_str("\n按 q 关闭此帮助窗口\n");
         
         content
+    }
+
+    /// 打开文件到缓冲区，但不在当前窗口中显示
+    pub fn open_file_to_buffer(&mut self, path: &Path) -> Result<usize> {
+        // 检查是否已经打开
+        for (idx, buffer) in self.buffers.iter().enumerate() {
+            if let Some(file_path) = &buffer.file_path {
+                if file_path == path {
+                    return Ok(idx); // 返回已存在的缓冲区索引
+                }
+            }
+        }
+        
+        // 创建新缓冲区
+        let buffer = Buffer::from_file(path)?;
+        self.buffers.push(buffer);
+        let buffer_idx = self.buffers.len() - 1;
+        
+        // 显示打开文件的状态消息
+        self.set_status_message(format!("已加载到缓冲区: {}", path.display()), StatusMessageType::Info);
+        
+        Ok(buffer_idx)
+    }
+    
+    /// 水平分割窗口并在新窗口中加载指定缓冲区
+    pub fn split_window_horizontal_with_buffer(&mut self, buffer_idx: usize) -> Result<WindowId> {
+        // 先创建水平分割窗口
+        let new_window_id = self.split_window_horizontal()?;
+        
+        // 在新窗口中加载指定缓冲区
+        if let Ok(tab) = self.tab_manager.current_tab_mut() {
+            if let Some(window) = tab.get_window_mut(new_window_id) {
+                window.set_buffer(buffer_idx);
+            }
+        }
+        
+        Ok(new_window_id)
     }
 }
