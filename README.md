@@ -109,6 +109,7 @@ fvim file1.txt file2.txt
 | `:win w` | 切换到下一个窗口 |
 | `:win W` | 切换到上一个窗口 |
 | `:tabnew` 或 `:tabe` | 新建标签页 |
+| `:file`  | 打开文件窗口 |
 
 ## ⚙️ 配置
 
