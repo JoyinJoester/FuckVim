@@ -444,6 +444,10 @@ pub struct Window {
     pub cursor_line: usize,
     /// 光标列位置
     pub cursor_col: usize,
+    /// 窗口高度
+    pub height: usize,
+    /// 窗口宽度
+    pub width: usize,
 }
 
 impl Window {
@@ -456,6 +460,8 @@ impl Window {
             scroll: (0, 0),
             cursor_line: 0,
             cursor_col: 0,
+            height: 10, // 默认高度
+            width: 80,  // 默认宽度
         }
     }
     
@@ -484,11 +490,17 @@ impl Window {
         self.scroll = (line, col);
     }
     
+    /// 设置窗口尺寸
+    pub fn set_size(&mut self, width: usize, height: usize) {
+        self.width = width;
+        self.height = height;
+    }
+    
     /// 确保光标可见
     pub fn ensure_cursor_visible(&mut self) {
-        // 假设窗口高度为10行，宽度为80列
-        let height = 10;
-        let width = 80;
+        // 使用实际窗口高度和宽度，而不是硬编码的值
+        let height = self.height;
+        let width = self.width;
         
         // 调整垂直滚动
         if self.cursor_line < self.scroll.0 {
@@ -499,6 +511,18 @@ impl Window {
             self.scroll.0 = self.cursor_line - height + 1;
         }
         
+        // 特殊处理：当光标在最后一行且位于行首时，确保有足够的上下文
+        // 这有助于在按Enter键创建新行时提供更好的视觉体验
+        if self.cursor_col == 0 && self.cursor_line > 0 {
+            // 确保前一行也可见，提供上下文
+            if self.cursor_line == self.scroll.0 {
+                // 如果光标行正好是第一个可见行，向上滚动一行
+                if self.scroll.0 > 0 {
+                    self.scroll.0 -= 1;
+                }
+            }
+        }
+        
         // 调整水平滚动
         if self.cursor_col < self.scroll.1 {
             // 光标在可见区域左侧，向左滚动
@@ -507,6 +531,13 @@ impl Window {
             // 光标在可见区域右侧，向右滚动
             self.scroll.1 = self.cursor_col - width + 1;
         }
+    }
+    
+    /// 更新光标位置并确保可见
+    pub fn update_cursor(&mut self, line: usize, col: usize) {
+        self.cursor_line = line;
+        self.cursor_col = col;
+        self.ensure_cursor_visible();
     }
 }
 

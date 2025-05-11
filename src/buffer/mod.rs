@@ -50,6 +50,9 @@ pub struct Buffer {
     
     /// 是否显示搜索高亮
     pub show_search_highlight: bool,
+    
+    /// 是否为只读缓冲区
+    pub read_only: bool,
 }
 
 /// 查找结果
@@ -118,7 +121,17 @@ impl Buffer {
             last_search_query: None,
             last_replace_text: None,
             show_search_highlight: false,
+            read_only: false,
         }
+    }
+    
+    /// 设置缓冲区内容
+    pub fn set_content(&mut self, content: &str) {
+        self.text = Rope::from_str(content);
+        self.modified = false;
+        self.highlight_dirty = true;
+        // 重置历史记录
+        self.history = History::new(1000);
     }
     
     /// 从文件加载缓冲区
@@ -157,6 +170,7 @@ impl Buffer {
             last_search_query: None,
             last_replace_text: None,
             show_search_highlight: false,
+            read_only: false,
         })
     }
     
@@ -193,6 +207,11 @@ impl Buffer {
     
     /// 插入文本
     pub fn insert(&mut self, line: usize, col: usize, text: &str) -> Result<()> {
+        // 检查是否为只读缓冲区
+        if self.read_only {
+            return Err(FKVimError::BufferError("缓冲区为只读".to_string()));
+        }
+        
         // 检查行列是否有效
         if line >= self.text.len_lines() {
             return Err(FKVimError::BufferError(format!("行号超出范围: {}", line)));
@@ -230,6 +249,11 @@ impl Buffer {
     
     /// 删除文本
     pub fn delete(&mut self, start_line: usize, start_col: usize, end_line: usize, end_col: usize) -> Result<()> {
+        // 检查是否为只读缓冲区
+        if self.read_only {
+            return Err(FKVimError::BufferError("缓冲区为只读".to_string()));
+        }
+        
         let start_idx = self.line_col_to_char_idx(start_line, start_col)?;
         let end_idx = self.line_col_to_char_idx(end_line, end_col)?;
         
@@ -994,6 +1018,7 @@ impl Clone for Buffer {
             last_search_query: self.last_search_query.clone(),
             last_replace_text: self.last_replace_text.clone(),
             show_search_highlight: self.show_search_highlight,
+            read_only: self.read_only,
         }
     }
 }

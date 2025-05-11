@@ -147,6 +147,13 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, editor: &mut Editor) -> Resul
                                     buffer.modified = true;
                                     editor.cursor_line += 1;
                                     editor.cursor_col = 0;
+                                    
+                                    // 确保新行可见 - 更新当前窗口的光标位置并确保可见
+                                    if let Ok(tab) = editor.tab_manager.current_tab_mut() {
+                                        if let Ok(window) = tab.active_window_mut() {
+                                            window.update_cursor(editor.cursor_line, editor.cursor_col);
+                                        }
+                                    }
                                 }
                                 true // 表示已处理
                             },
@@ -319,6 +326,15 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, editor: &mut Editor) -> Resul
                                     // 借用结束后更新编辑器的光标位置
                                     editor.cursor_line = new_line;
                                     editor.cursor_col = new_col;
+                                    
+                                    // 确保新位置可见 - 特别是对于换行符
+                                    if text == "\n" {
+                                        if let Ok(tab) = editor.tab_manager.current_tab_mut() {
+                                            if let Ok(window) = tab.active_window_mut() {
+                                                window.update_cursor(editor.cursor_line, editor.cursor_col);
+                                            }
+                                        }
+                                    }
                                 }
                             },
                             crate::input::InputAction::Delete(start_line, start_col, end_line, end_col) => {
@@ -487,13 +503,29 @@ fn ui(f: &mut Frame, editor: &Editor) {
     let status_bar_height = 3;  // 状态栏固定高度 (包含上下边框)
     let cmd_line_height = 3;    // 命令行固定高度 (包含上下边框)
     
+    // 确保总高度足够，防止溢出
+    let total_min_height = status_bar_height + cmd_line_height + (if terminal_visible { 1 } else { 0 });
+    
+    if area.height <= total_min_height {
+        // 高度不够，简单显示一个错误信息
+        let text = vec![
+            Line::from(vec![
+                Span::styled("窗口太小，无法正常显示", Style::default().fg(Color::Red))
+            ])
+        ];
+        let paragraph = Paragraph::new(text).alignment(Alignment::Center);
+        f.render_widget(paragraph, area);
+        return;
+    }
+    
     // 计算主界面区域
     let main_area = if terminal_visible {
-        let terminal_height = editor.terminal_height.min((area.height as u16) / 2);
-        Rect::new(0, 0, area.width, area.height - terminal_height - status_bar_height - cmd_line_height)
+        let available_height = area.height.saturating_sub(status_bar_height).saturating_sub(cmd_line_height);
+        let terminal_height = editor.terminal_height.min(available_height / 2);
+        Rect::new(0, 0, area.width, available_height.saturating_sub(terminal_height))
     } else {
         // 减去状态栏和命令行的高度
-        Rect::new(0, 0, area.width, area.height - status_bar_height - cmd_line_height)
+        Rect::new(0, 0, area.width, area.height.saturating_sub(status_bar_height).saturating_sub(cmd_line_height))
     };
     
     // 绘制编辑器主窗口
@@ -501,7 +533,8 @@ fn ui(f: &mut Frame, editor: &Editor) {
     
     // 绘制终端区域（如果可见）
     let (status_y, cmd_y) = if terminal_visible {
-        let terminal_height = editor.terminal_height.min((area.height as u16) / 2);
+        let available_height = area.height.saturating_sub(status_bar_height).saturating_sub(cmd_line_height);
+        let terminal_height = editor.terminal_height.min(available_height / 2);
         let terminal_area = Rect::new(0, main_area.height, area.width, terminal_height);
         draw_terminal(f, editor, terminal_area);
         
@@ -573,6 +606,36 @@ fn draw_window(
     area: Rect, 
     is_active: bool
 ) {
+    // 检查窗口尺寸是否足够大
+    if area.width < 3 || area.height < 3 {
+        // 窗口太小，无法正常显示
+        return;
+    }
+    
+    // 获取可变窗口引用以更新尺寸
+    // 因为window参数是不可变的，我们需要通过editor来获取可变引用
+    if is_active {
+        // 更新窗口尺寸，以便正确计算滚动
+        if let Ok(tab) = editor.tab_manager.current_tab() {
+            if let Some(win_id) = tab.active_window_id() {
+                // 这里我们不能直接修改window，因为它是不可变引用
+                // 但我们可以在绘制之前更新editor中的窗口尺寸
+                // 这是安全的，因为我们只是在UI渲染过程中
+                let inner_height = area.height.saturating_sub(2) as usize; // 减去边框
+                let inner_width = area.width.saturating_sub(2) as usize; // 减去边框
+                
+                // 使用unsafe块来获取可变引用，因为我们知道这是安全的
+                // 我们只是在更新窗口的尺寸，不会影响其他状态
+                unsafe {
+                    let window_mut = (window as *const crate::editor::Window as *mut crate::editor::Window).as_mut().unwrap();
+                    window_mut.set_size(inner_width, inner_height);
+                    // 确保光标可见
+                    window_mut.ensure_cursor_visible();
+                }
+            }
+        }
+    }
+    
     // 创建窗口边框
     let title = if buffer.file_path.is_some() {
         let path = buffer.file_path.as_ref().unwrap();
@@ -604,6 +667,11 @@ fn draw_window(
     // 可视区域
     let inner_area = block.inner(area);
     f.render_widget(block, area);
+    
+    // 检查内部区域是否有足够的空间
+    if inner_area.width == 0 || inner_area.height == 0 {
+        return;
+    }
     
     // 计算可见行范围
     let line_offset = window.scroll_offset().0;

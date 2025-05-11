@@ -211,6 +211,13 @@ impl Editor {
     pub fn move_cursor_left(&mut self) {
         if self.cursor_col > 0 {
             self.cursor_col -= 1;
+            
+            // 更新当前窗口的光标位置并确保可见
+            if let Ok(tab) = self.tab_manager.current_tab_mut() {
+                if let Ok(window) = tab.active_window_mut() {
+                    window.update_cursor(self.cursor_line, self.cursor_col);
+                }
+            }
         }
     }
     
@@ -220,6 +227,13 @@ impl Editor {
             if let Some(line) = buffer.text.get_line(self.cursor_line) {
                 if self.cursor_col < line.len_chars() {
                     self.cursor_col += 1;
+                    
+                    // 更新当前窗口的光标位置并确保可见
+                    if let Ok(tab) = self.tab_manager.current_tab_mut() {
+                        if let Ok(window) = tab.active_window_mut() {
+                            window.update_cursor(self.cursor_line, self.cursor_col);
+                        }
+                    }
                 }
             }
         }
@@ -241,6 +255,13 @@ impl Editor {
             
             self.cursor_line = new_line;
             self.cursor_col = self.cursor_col.min(max_col);
+            
+            // 更新当前窗口的光标位置并确保可见
+            if let Ok(tab) = self.tab_manager.current_tab_mut() {
+                if let Ok(window) = tab.active_window_mut() {
+                    window.update_cursor(self.cursor_line, self.cursor_col);
+                }
+            }
         }
         Ok(())
     }
@@ -265,6 +286,13 @@ impl Editor {
         if should_move {
             self.cursor_line = new_line;
             self.cursor_col = self.cursor_col.min(max_col);
+            
+            // 更新当前窗口的光标位置并确保可见
+            if let Ok(tab) = self.tab_manager.current_tab_mut() {
+                if let Ok(window) = tab.active_window_mut() {
+                    window.update_cursor(self.cursor_line, self.cursor_col);
+                }
+            }
         }
         
         Ok(())
@@ -640,6 +668,10 @@ impl Editor {
                     self.save_current_file()?;
                 }
                 self.status = EditorStatus::Exiting;
+            },
+            "help" => {
+                // 显示帮助信息
+                self.show_help()?;
             },
             "e" | "edit" => {
                 if parts.len() > 1 {
@@ -1294,5 +1326,127 @@ impl Editor {
         }
         
         Ok(())
+    }
+
+    /// 显示帮助信息
+    pub fn show_help(&mut self) -> Result<()> {
+        // 创建帮助内容
+        let help_content = self.generate_help_content();
+        
+        // 创建新缓冲区用于帮助内容
+        let mut help_buffer = Buffer::new();
+        help_buffer.set_content(&help_content);
+        help_buffer.file_path = Some(std::path::PathBuf::from("[帮助]")); // 虚拟路径
+        help_buffer.read_only = true; // 设为只读
+        
+        // 添加到缓冲区列表
+        self.buffers.push(help_buffer);
+        let help_buffer_idx = self.buffers.len() - 1;
+        
+        // 垂直分割窗口
+        let new_window_id = self.split_window_vertical()?;
+        
+        // 在新窗口中加载帮助缓冲区
+        if let Ok(tab) = self.tab_manager.current_tab_mut() {
+            if let Some(window) = tab.get_window_mut(new_window_id) {
+                window.set_buffer(help_buffer_idx);
+            }
+        }
+        
+        // 设置状态消息
+        self.set_status_message("帮助文档已打开", StatusMessageType::Info);
+        
+        Ok(())
+    }
+
+    /// 生成帮助内容
+    fn generate_help_content(&self) -> String {
+        let mut content = String::new();
+        
+        // 添加标题
+        content.push_str("FKVim 帮助文档\n");
+        content.push_str("=============\n\n");
+        
+        // 基本命令
+        content.push_str("基本命令:\n");
+        content.push_str("---------\n");
+        content.push_str(":q                  退出编辑器\n");
+        content.push_str(":w                  保存当前文件\n");
+        content.push_str(":wq, :x             保存并退出\n");
+        content.push_str(":e <文件>           编辑指定文件\n");
+        content.push_str(":help               显示此帮助\n\n");
+        
+        // 窗口管理
+        content.push_str("窗口管理:\n");
+        content.push_str("---------\n");
+        content.push_str(":split, :sp         水平分割窗口\n");
+        content.push_str(":vsplit, :vs        垂直分割窗口\n");
+        content.push_str(":close, :clo        关闭当前窗口\n");
+        content.push_str(":wincmd h           切换到左侧窗口\n");
+        content.push_str(":wincmd j           切换到下方窗口\n");
+        content.push_str(":wincmd k           切换到上方窗口\n");
+        content.push_str(":wincmd l           切换到右侧窗口\n\n");
+        
+        // 标签页管理
+        content.push_str("标签页管理:\n");
+        content.push_str("-----------\n");
+        content.push_str(":tabnew, :tabe      新建标签页\n");
+        content.push_str(":tabnext, :tabn     切换到下一个标签页\n");
+        content.push_str(":tabprevious, :tabp 切换到上一个标签页\n");
+        content.push_str(":tabclose, :tabc    关闭当前标签页\n\n");
+        
+        // 缓冲区管理
+        content.push_str("缓冲区管理:\n");
+        content.push_str("-----------\n");
+        content.push_str(":buffer, :b <编号>  切换到指定缓冲区\n");
+        content.push_str(":bnext, :bn         切换到下一个缓冲区\n");
+        content.push_str(":bprevious, :bp     切换到上一个缓冲区\n\n");
+        
+        // 终端集成
+        content.push_str("终端集成:\n");
+        content.push_str("---------\n");
+        content.push_str(":toggleterm         切换终端可见性\n");
+        content.push_str(":focusterm          聚焦到终端\n");
+        content.push_str(":exitterm           退出终端模式\n");
+        content.push_str(":sendterm <命令>    向终端发送命令\n");
+        content.push_str(":clearterm          清空终端\n");
+        content.push_str(":restartterm        重启终端\n\n");
+        
+        // 文件浏览
+        content.push_str("文件浏览:\n");
+        content.push_str("---------\n");
+        content.push_str(":browse, :explorer  打开文件浏览器\n\n");
+        
+        // 搜索
+        content.push_str("搜索:\n");
+        content.push_str("-----\n");
+        content.push_str(":find, :search <文本>     搜索文本（不区分大小写）\n");
+        content.push_str(":findcase, :searchcase <文本>  搜索文本（区分大小写）\n\n");
+        
+        // 普通模式快捷键
+        content.push_str("普通模式快捷键:\n");
+        content.push_str("-------------\n");
+        content.push_str("h, j, k, l          左、下、上、右移动\n");
+        content.push_str("i                    进入插入模式\n");
+        content.push_str("a                    在光标后进入插入模式\n");
+        content.push_str("o                    在下方新行进入插入模式\n");
+        content.push_str("O                    在上方新行进入插入模式\n");
+        content.push_str("x                    删除字符\n");
+        content.push_str("dd                   删除行\n");
+        content.push_str("yy                   复制行\n");
+        content.push_str("p                    粘贴\n");
+        content.push_str("u                    撤销\n");
+        content.push_str("Ctrl+r               重做\n\n");
+        
+        // 插入模式快捷键
+        content.push_str("插入模式快捷键:\n");
+        content.push_str("-------------\n");
+        content.push_str("Esc                  返回普通模式\n");
+        content.push_str("Ctrl+s               保存文件\n\n");
+        
+        // 底部提示
+        content.push_str("\n按 q 关闭此帮助窗口\n");
+        
+        content
     }
 }
