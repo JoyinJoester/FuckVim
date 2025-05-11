@@ -1,15 +1,16 @@
 # FuckVim - 一个现代化的 Vim 编辑器替代品
 (未补完，超级残次品)
+
 [![GitHub license](https://img.shields.io/github/license/JoyinJoester/Fuckvim)](https://github.com/JoyinJoester/Fuckvim/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/JoyinJoester/Fuckvim)](https://github.com/JoyinJoester/Fuckvim/stargazers)
 [![GitHub issues](https://img.shields.io/github/issues/JoyinJoester/Fuckvim)](https://github.com/JoyinJoester/Fuckvim/issues)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
-> 🚀 强大的模态编辑器，结合了 Vim 的高效与现代编辑器的友好体验
+> 🚀 一个使用rust写的vim类软件
 
 ## 📋 功能概览
 
-FVim 是一个基于 Rust 构建的现代化文本编辑器，旨在提供 Vim/Neovim 的强大功能，同时融合现代编辑器的用户体验和更友好的界面：
+FVim 是一个基于 Rust 构建的现代化文本编辑器，旨在提供 Vim/Neovim 的功能，同时融合现代编辑器的用户体验和更友好的界面：
 
 - ⚡ **高性能** - 基于 Rust 构建，启动迅速，即使处理大文件也能保持流畅
 - 🔍 **强大的编辑能力** - 保留 Vim 的模态编辑和快捷键理念
@@ -17,7 +18,6 @@ FVim 是一个基于 Rust 构建的现代化文本编辑器，旨在提供 Vim/N
 - 🖥️ **内置终端** - 无需离开编辑器即可使用命令行
 - 🌈 **语法高亮** - 基于 Tree-sitter 的高级语法解析和高亮显示
 - 📑 **多标签页和分屏** - 灵活的窗口管理，提高工作效率
-- 📁 **文件浏览器** - 方便的文件导航和管理
 - 🔄 **缓冲区管理** - 高效处理多个文件
 
 ## 🚀 快速开始
@@ -255,5 +255,5 @@ FVim 的开发受到了以下项目的启发：
 ---
 
 <p align="center">
-  使用 ❤️ 和 Rust 构建
+  使用 Rust 构建
 </p>
