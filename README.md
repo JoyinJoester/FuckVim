@@ -1,4 +1,4 @@
-# FuckVim - 一个现代化的 Vim 编辑器替代品
+# FuckVim - 一个基于rust的 Vim 编辑器替代品
 (未补完，超级残次品)
 
 [![GitHub license](https://img.shields.io/github/license/JoyinJoester/Fuckvim)](https://github.com/JoyinJoester/Fuckvim/blob/main/LICENSE)
@@ -7,6 +7,8 @@
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
 > 🚀 一个使用rust写的vim类软件
+> 支持系统：linux，理论上rust构建是都可以跑的，但是我在我的win本上测试出现了一些小问题，我也没有别的设备进行测试，所以默认只支持linux了
+> 此项目使用ai进行代码审查，毕竟实在太方便了
 
 ## 📋 功能概览
 
