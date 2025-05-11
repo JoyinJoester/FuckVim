@@ -26,7 +26,7 @@ FVim 是一个基于 Rust 构建的现代化文本编辑器，旨在提供 Vim/N
 
 #### 使用预编译二进制文件
 
-从 [Releases](https://github.com/JoyinJoester/Fuckvim/releases) 页面下载适用于您操作系统的最新版本。
+从 [Releases](https://github.com/JoyinJoester/FuckVim/releases) 页面下载适用于您操作系统的最新版本。
 
 #### 从源码编译
 
@@ -110,8 +110,7 @@ fvim file1.txt file2.txt
 
 FVim 使用 Lua 进行配置，配置文件位于：
 
-- **Linux/macOS**: `~/.config/fvim/config.lua`
-- **Windows**: `%USERPROFILE%\.config\fvim\config.lua`
+- **Linux**: `~/.config/fvim/config.lua`
 
 ### 示例配置
 
