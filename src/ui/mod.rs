@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect, Alignment},
     style::{Color, Style, Modifier},
     text::{Span, Text, Line},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap, ListState},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap, ListState, Tabs},
     Frame, Terminal,
 };
 use crate::editor::{Editor, EditorMode, EditorStatus, StatusMessageType, CommandLineMode};
@@ -526,8 +526,11 @@ fn ui(f: &mut Frame, editor: &Editor) {
     let status_bar_height = 3;  // 状态栏固定高度 (包含上下边框)
     let cmd_line_height = 3;    // 命令行固定高度 (包含上下边框)
     
+    // 判断是否显示标签页 - 当有两个及以上标签页时才显示
+    let tabs_height = if editor.tab_manager.tabs.len() >= 2 { 1 } else { 0 };
+    
     // 确保总高度足够，防止溢出
-    let total_min_height = status_bar_height + cmd_line_height + (if terminal_visible { 1 } else { 0 });
+    let total_min_height = status_bar_height + cmd_line_height + tabs_height + (if terminal_visible { 1 } else { 0 });
     
     if area.height <= total_min_height {
         // 高度不够，简单显示一个错误信息
@@ -542,7 +545,9 @@ fn ui(f: &mut Frame, editor: &Editor) {
     }
     
     // 计算主界面区域
-    let available_height = area.height.saturating_sub(status_bar_height).saturating_sub(cmd_line_height);
+    let available_height = area.height.saturating_sub(status_bar_height)
+                                     .saturating_sub(cmd_line_height)
+                                     .saturating_sub(tabs_height);
     
     // 处理文件管理器
     let main_area = if file_manager_visible {
@@ -554,7 +559,7 @@ fn ui(f: &mut Frame, editor: &Editor) {
                 Constraint::Length(file_manager_width),
                 Constraint::Min(10),
             ].as_ref())
-            .split(Rect::new(0, 0, area.width, available_height));
+            .split(Rect::new(0, tabs_height, area.width, available_height));
         
         // 绘制文件管理器
         if let Some(file_browser) = &editor.file_browser {
@@ -569,11 +574,17 @@ fn ui(f: &mut Frame, editor: &Editor) {
     } else if terminal_visible {
         // 没有文件管理器，但有终端
         let terminal_height = editor.terminal_height.min(available_height / 2);
-        Rect::new(0, 0, area.width, available_height.saturating_sub(terminal_height))
+        Rect::new(0, tabs_height, area.width, available_height.saturating_sub(terminal_height))
     } else {
         // 只有编辑区
-        Rect::new(0, 0, area.width, available_height)
+        Rect::new(0, tabs_height, area.width, available_height)
     };
+    
+    // 绘制标签页（如果有两个以上标签）
+    if tabs_height > 0 {
+        let tabs_area = Rect::new(0, 0, area.width, tabs_height);
+        draw_tabs(f, editor, tabs_area);
+    }
     
     // 绘制编辑器主窗口
     draw_editor(f, editor, main_area);
@@ -581,12 +592,12 @@ fn ui(f: &mut Frame, editor: &Editor) {
     // 绘制终端区域（如果可见）
     let (status_y, cmd_y) = if terminal_visible {
         let terminal_height = editor.terminal_height.min(available_height / 2);
-        let terminal_area = Rect::new(0, main_area.height, area.width, terminal_height);
+        let terminal_area = Rect::new(0, main_area.height + tabs_height, area.width, terminal_height);
         draw_terminal(f, editor, terminal_area);
         
-        (main_area.height + terminal_height, main_area.height + terminal_height + status_bar_height)
+        (main_area.height + terminal_height + tabs_height, main_area.height + terminal_height + status_bar_height + tabs_height)
     } else {
-        (main_area.height, main_area.height + status_bar_height)
+        (main_area.height + tabs_height, main_area.height + status_bar_height + tabs_height)
     };
     
     // 绘制状态栏 - 固定在主区域和终端区域之后
@@ -662,8 +673,8 @@ fn draw_window(
     // 我们只是在更新窗口的尺寸，不会影响其他状态
     // 注意：这里使用了克隆来避免不安全的可变引用转换
     // 在实际应用中，应该考虑使用RefCell或其他安全的内部可变性机制
-    let inner_height = area.height.saturating_sub(2) as usize; // 减去边框
-    let inner_width = area.width.saturating_sub(2) as usize; // 减去边框
+    let _inner_height = area.height.saturating_sub(2) as usize; // 减去边框
+    let _inner_width = area.width.saturating_sub(2) as usize; // 减去边框
     
     // 在UI渲染过程中，我们不修改窗口尺寸，而是只在绘制时考虑这些尺寸
     // 这样可以避免不安全的可变引用转换
@@ -1570,4 +1581,38 @@ fn render_filenames_panel(f: &mut Frame, rect: Rect, editor: &Editor) {
     
     // 渲染列表
     f.render_widget(list, rect);
+}
+
+/// 绘制标签页
+fn draw_tabs(f: &mut Frame, editor: &Editor, area: Rect) {
+    // 获取所有标签页名称
+    let tab_titles: Vec<Line> = editor.tab_manager.tabs
+        .iter()
+        .map(|tab| {
+            // 截断过长的标签名
+            let title = if tab.name.len() > 20 {
+                let shortened = &tab.name[tab.name.len().saturating_sub(19)..];
+                format!("...{}", shortened)
+            } else {
+                tab.name.clone()
+            };
+            
+            Line::from(vec![Span::styled(
+                format!(" {} ", title),
+                Style::default().fg(Color::White),
+            )])
+        })
+        .collect();
+    
+    // 创建标签组件
+    let tabs = Tabs::new(tab_titles)
+        .select(editor.tab_manager.current_tab)
+        .style(Style::default().fg(Color::White))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+    
+    f.render_widget(tabs, area);
 }

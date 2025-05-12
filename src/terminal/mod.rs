@@ -147,7 +147,7 @@ impl TerminalSession {
                 let max_history = self.max_history;
                 
                 // 使用标准库的线程处理标准输出 - 使用字节级读取而不是行缓冲
-                let stdout_thread = thread::spawn(move || {
+                let _stdout_thread = thread::spawn(move || {
                     let mut reader = BufReader::new(stdout);
                     let mut buffer = [0; 4096]; // 增大缓冲区以处理更多数据
                     let mut line_buffer = String::new();
@@ -214,7 +214,7 @@ impl TerminalSession {
                 });
                 
                 // 使用标准库的线程处理标准错误 - 使用字节级读取
-                let stderr_thread = thread::spawn(move || {
+                let _stderr_thread = thread::spawn(move || {
                     let mut reader = BufReader::new(stderr);
                     let mut buffer = [0; 4096]; // 增大缓冲区以处理更多数据
                     let mut line_buffer = String::new();

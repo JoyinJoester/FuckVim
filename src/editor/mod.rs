@@ -777,7 +777,13 @@ impl Editor {
             },
             "tabnew" | "tabe" => {
                 // 创建新标签页
-                self.new_tab()?;
+                if parts.len() > 1 {
+                    // 提取名称参数，允许有空格的名称
+                    let tab_name = parts[1..].join(" ");
+                    self.new_tab_with_name(&tab_name)?;
+                } else {
+                    self.new_tab()?;
+                }
             },
             "tabnext" | "tabn" => {
                 // 切换到下一个标签页
@@ -941,66 +947,40 @@ impl Editor {
             return Err(FKVimError::EditorError(format!("无效的缓冲区索引: {}", buffer_idx)));
         }
         
-        // 设置当前缓冲区索引
-        self.current_buffer = buffer_idx;
-        
-        // 提前准备状态消息和标题
-        let (status_message, title) = if let Some(path) = &self.buffers[buffer_idx].file_path {
-            let status = format!("已加载文件: {}", path.display());
-            let title = path.file_name()
-                .and_then(|f| f.to_str())
-                .map(|s| s.to_string());
-            (Some(status), title)
-        } else {
-            (None, None)
-        };
-        
         // 获取当前标签页和窗口
         if let Ok(tab) = self.tab_manager.current_tab_mut() {
             if let Some(window_id) = tab.active_window_id() {
                 if let Some(window) = tab.get_window_mut(window_id) {
                     window.set_buffer(buffer_idx);
-                    
-                    // 如果有标题，更新标签页标题
-                    if let Some(title_str) = &title {
-                        tab.set_title(title_str.clone());
-                    }
-                    
-                    // 这里已经对 tab 完成了操作，可以安全地释放借用
+                    self.current_buffer = buffer_idx;
+                    return Ok(());
                 }
             }
         }
         
-        // 现在可以安全地设置状态消息
-        if let Some(msg) = status_message {
-            self.set_status_message(msg, StatusMessageType::Info);
-        }
-        
-        // 如果没有活动窗口，则创建一个
-        if self.tab_manager.is_empty() {
-            self.new_tab()?;
-            
-            // 再次尝试设置缓冲区
-            if let Ok(tab) = self.tab_manager.current_tab_mut() {
-                if let Some(window_id) = tab.active_window_id() {
-                    if let Some(window) = tab.get_window_mut(window_id) {
-                        window.set_buffer(buffer_idx);
-                        
-                        // 如果有标题，更新标签页标题
-                        if let Some(title_str) = &title {
-                            tab.set_title(title_str.clone());
-                        }
-                    }
-                }
-            }
-        }
-        
+        self.current_buffer = buffer_idx;
         Ok(())
     }
     
     /// 创建新标签页
     pub fn new_tab(&mut self) -> Result<TabId> {
         let tab_id = self.tab_manager.new_tab("New Tab".to_string())?;
+        let tab_id = TabId(tab_id);
+        
+        // 在新标签页中创建一个窗口
+        if let Ok(tab) = self.tab_manager.get_tab_mut(tab_id) {
+            let window_id = WindowId(0); // 暂时使用一个假ID，实际应由Tab生成
+            let window = Window::new(window_id, self.current_buffer);
+            let window_id = tab.add_window(window);
+            tab.set_active_window(window_id)?;
+        }
+        
+        Ok(tab_id)
+    }
+
+    /// 创建带指定名称的新标签页
+    pub fn new_tab_with_name(&mut self, name: &str) -> Result<TabId> {
+        let tab_id = self.tab_manager.new_tab(name.to_string())?;
         let tab_id = TabId(tab_id);
         
         // 在新标签页中创建一个窗口
