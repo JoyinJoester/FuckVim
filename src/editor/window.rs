@@ -448,6 +448,8 @@ pub struct Window {
     pub height: usize,
     /// 窗口宽度
     pub width: usize,
+    /// 强制刷新标志
+    pub force_refresh: bool,
 }
 
 impl Window {
@@ -462,6 +464,7 @@ impl Window {
             cursor_col: 0,
             height: 10, // 默认高度
             width: 80,  // 默认宽度
+            force_refresh: false,
         }
     }
     
@@ -531,6 +534,10 @@ impl Window {
             // 光标在可见区域右侧，向右滚动
             self.scroll.1 = self.cursor_col - width + 1;
         }
+        
+        // 确保滚动后的区域不会导致已有内容残留
+        // 通过强制完全重绘可见区域来处理文本残留问题
+        self.force_refresh = true;
     }
     
     /// 更新光标位置并确保可见

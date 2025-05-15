@@ -668,17 +668,9 @@ fn draw_window(
         // 窗口太小，无法正常显示
         return;
     }
-    
-    // 使用unsafe块来获取可变引用，因为我们知道这是安全的
-    // 我们只是在更新窗口的尺寸，不会影响其他状态
-    // 注意：这里使用了克隆来避免不安全的可变引用转换
-    // 在实际应用中，应该考虑使用RefCell或其他安全的内部可变性机制
+
     let _inner_height = area.height.saturating_sub(2) as usize; // 减去边框
     let _inner_width = area.width.saturating_sub(2) as usize; // 减去边框
-    
-    // 在UI渲染过程中，我们不修改窗口尺寸，而是只在绘制时考虑这些尺寸
-    // 这样可以避免不安全的可变引用转换
-    // 窗口的实际尺寸更新应该在处理事件时进行
     
     // 创建窗口边框
     let title = if buffer.file_path.is_some() {
@@ -740,37 +732,64 @@ fn draw_window(
         0
     };
     
-    for (i, line) in visible_lines.iter().enumerate() {
+    // 总是填充整个可见区域，防止文本残留
+    // 特别是当窗口强制刷新标志被设置时
+    for i in 0..visible_height {
         let line_idx = line_offset + i;
-        let mut line_text = line.to_string(); // 将RopeSlice转换为String
         
-        // 如果开启了行号显示，在每行前添加行号
-        if editor.config.show_line_numbers {
-            // 行号从1开始计数，右对齐显示
-            let line_number = format!("{:>width$} ", line_idx + 1, width = line_number_width - 1);
-            line_text = format!("{}{}", line_number, line_text);
-        }
-        
-        let line_highlights = get_highlight_spans_for_line(buffer, line_idx, highlights);
-        
-        // 需要调整高亮的起始位置，考虑行号占用的空间
-        let adjusted_highlights = if editor.config.show_line_numbers {
-            line_highlights.iter().map(|span| {
-                let mut new_span = span.clone();
-                new_span.start_col += line_number_width;
-                new_span.end_col += line_number_width;
-                new_span
-            }).collect()
+        if i < visible_lines.len() {
+            let line = visible_lines[i];
+            
+            let mut line_text = line.to_string(); // 将RopeSlice转换为String
+            
+            // 如果开启了行号显示，在每行前添加行号
+            if editor.config.show_line_numbers {
+                // 行号从1开始计数，右对齐显示
+                let line_number = format!("{:>width$} ", line_idx + 1, width = line_number_width - 1);
+                line_text = format!("{}{}", line_number, line_text);
+            }
+            
+            let line_highlights = get_highlight_spans_for_line(buffer, line_idx, highlights);
+            
+            // 需要调整高亮的起始位置，考虑行号占用的空间
+            let adjusted_highlights = if editor.config.show_line_numbers {
+                line_highlights.iter().map(|span| {
+                    let mut new_span = span.clone();
+                    new_span.start_col += line_number_width;
+                    new_span.end_col += line_number_width;
+                    new_span
+                }).collect()
+            } else {
+                line_highlights
+            };
+            
+            // 将高亮转换为样式
+            let styled_line = render_line_with_highlights(&line_text, &adjusted_highlights);
+            text_spans.push(Line::from(styled_line));
         } else {
-            line_highlights
-        };
-        
-        // 将高亮转换为样式
-        let styled_line = render_line_with_highlights(&line_text, &adjusted_highlights);
-        text_spans.push(Line::from(styled_line));
+            // 如果没有足够的行，添加空行以清除旧内容
+            // 增加空格以确保清除整行，而不是仅添加空字符串
+            let empty_line = if editor.config.show_line_numbers {
+                // 保持行号格式一致，但内容为空
+                let line_number = format!("{:>width$} ", line_idx + 1, width = line_number_width - 1);
+                // 添加空格填充整行，确保覆盖旧内容
+                format!("{}{}",  line_number, " ".repeat(inner_area.width as usize - line_number_width))
+            } else {
+                // 添加空格填充整行
+                " ".repeat(inner_area.width as usize)
+            };
+            
+            text_spans.push(Line::from(empty_line));
+        }
     }
     
     // 渲染文本内容
+    // 创建一个清除背景的区域，确保完全清除旧内容
+    let clear_block = Block::default()
+        .style(Style::default().bg(Color::Reset)); // 重置背景色
+    f.render_widget(clear_block, inner_area);
+    
+    // 然后渲染实际内容
     let paragraph = Paragraph::new(text_spans)
         .scroll((0, 0));
     
@@ -802,6 +821,13 @@ fn draw_window(
                     inner_area.y + cursor_y as u16
                 ));
             }
+        }
+    }
+    
+    // 更新后清除强制刷新标志
+    if let Some(window_mut) = unsafe { (window as *const _ as *mut crate::editor::Window).as_mut() } {
+        if window_mut.force_refresh {
+            window_mut.force_refresh = false;
         }
     }
 }
