@@ -1314,9 +1314,9 @@ func (m Model) handleCommandMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	default:
-		// 添加字符到命令缓冲区
-		if len(msg.String()) == 1 {
-			m.commandBuffer += msg.String()
+		// 添加字符到命令缓冲区 (支持中文等多字节字符)
+		if len(msg.Runes) > 0 {
+			m.commandBuffer += string(msg.Runes)
 			m.statusMsg = ":" + m.commandBuffer
 		}
 	}
