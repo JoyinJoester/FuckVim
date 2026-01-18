@@ -949,6 +949,23 @@ func (m Model) handleCommandMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnter:
 		// 执行命令
 		cmd := m.executeCommand()
+		
+		// 重置命令模式状态
+		m.mode = NormalMode
+		m.commandBuffer = ""
+		
+		// 恢复焦点到合适的窗口 (只在仍是 FocusCommand 时)
+		// 如果 executeCommand 已经设置了焦点，不要覆盖它
+		if m.focus == FocusCommand {
+			if m.showGit {
+				m.focus = FocusGit
+			} else if m.showSidebar {
+				m.focus = FocusFileTree
+			} else {
+				m.focus = FocusEditor
+			}
+		}
+		
 		if cmd != nil {
 			return m, cmd
 		}
@@ -996,6 +1013,10 @@ func (m *Model) executeCommand() tea.Cmd {
 				m.statusMsg = fmt.Sprintf("⚠ 保存失败: %v", err)
 			} else {
 				m.statusMsg = fmt.Sprintf("\"%s\" %d 行已写入", m.filename, len(m.lines))
+				// 保存后自动刷新 Git 状态
+				if m.showGit {
+					m.syncGitStatus()
+				}
 			}
 		}
 

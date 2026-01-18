@@ -9,6 +9,7 @@ fn main() {
     
     // Check syntax highlighting
     // ;;rust is awesome
+
 }
 
 struct Point {
