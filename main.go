@@ -1831,11 +1831,18 @@ func (m *Model) syncSizes() {
 
 	// 编辑器逻辑: 剩余宽度完全分配给编辑器
 	editorWidth := m.width - sidebarWidth
-	if editorWidth < 10 { editorWidth = 10 }
+	if editorWidth < 10 {
+		editorWidth = 10
+	}
 
-	// 高度逻辑: 减去底部状态栏 (1行)
-	contentHeight := m.height - 1
-	if contentHeight < 0 { contentHeight = 0 }
+	// 动态高度逻辑: 实时渲染状态栏以获取其实际高度
+	statusBar := m.renderStatusBar()
+	statusBarHeight := lipgloss.Height(statusBar)
+
+	contentHeight := m.height - statusBarHeight
+	if contentHeight < 0 {
+		contentHeight = 0
+	}
 
 	// 更新缓存值
 	m.cachedSidebarWidth = sidebarWidth
@@ -1851,18 +1858,19 @@ func (m Model) calculateSizes() (int, int, int, int) {
 	}
 
 	// Fallback: 手动计算 (初始化时)
-	totalWidth := m.width
-	totalHeight := m.height
+	statusBar := m.renderStatusBar()
+	statusBarHeight := lipgloss.Height(statusBar)
 
 	sidebarWidth := 0
 	if m.showSidebar || m.showGit {
 		sidebarWidth = 30
 	}
 
-	editorWidth := totalWidth - sidebarWidth
-    
-	contentHeight := totalHeight - 1
-	if contentHeight < 0 { contentHeight = 0 }
+	editorWidth := m.width - sidebarWidth
+	contentHeight := m.height - statusBarHeight
+	if contentHeight < 0 {
+		contentHeight = 0
+	}
 
 	return sidebarWidth, editorWidth, contentHeight, contentHeight
 }
@@ -2310,15 +2318,13 @@ func (m Model) renderStatusBar() string {
 
 	// Msg styling
 	msg := m.statusMsg
-	if len(msg) > availWidth-2 {
-		msg = msg[:availWidth-2] + "..."
-	}
-	// Fill remaining with space
-	padding := availWidth - lipgloss.Width(msg) - 1 // -1 for safe margin
-	if padding < 0 { padding = 0 }
 	
-	middleContent := fmt.Sprintf(" %s%s", msg, strings.Repeat(" ", padding))
-	middlePart := statusBarStyle.Render(middleContent)
+	// 不再强制截断 msg 到单行剩余宽度，
+	// 而是允许其在样式器中自动折行（或由 renderStatusBar 的调用者根据 Width 限制）
+	// 但为了保持左右对齐的视觉效果，我们仍然计算中间部分的填充
+	
+	middleContent := fmt.Sprintf(" %s", msg)
+	middlePart := statusBarStyle.Width(availWidth).Render(middleContent)
 
 	return leftPart + middlePart + rightPart
 }
