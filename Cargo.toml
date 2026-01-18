@@ -1,0 +1,80 @@
+[package]
+name = "fkvim"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "fkvim"
+path = "src/main.rs"
+
+[[bin]]
+name = "fvim"
+path = "src/main.rs"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[dependencies]
+# 界面相关
+crossterm = "0.27"      # 终端操作库
+tui = { package = "ratatui", version = "0.24" }  # TUI库
+
+# 文本编辑核心
+ropey = "1.6"           # 用于高效文本编辑的rope数据结构
+tree-sitter = "0.20"    # 代码解析和语法高亮
+unicode-width = "0.1"   # Unicode宽度处理
+regex = "1.9"           # 正则表达式支持
+
+# Tree-sitter 语言支持
+tree-sitter-rust = "0.20"
+tree-sitter-lua = "0.0.18"
+tree-sitter-c = "0.20"
+tree-sitter-cpp = "0.20"
+tree-sitter-python = "0.20"
+tree-sitter-javascript = "0.20"
+tree-sitter-go = "0.19"
+tree-sitter-html = "0.19"
+tree-sitter-css = "0.19"
+tree-sitter-json = "0.20"
+tree-sitter-toml = "0.20"
+
+# Lua支持
+mlua = { version = "0.9", features = ["lua54", "vendored"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"      # 用于数据序列化
+
+# 异步和事件处理
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# 文件和路径处理
+directories = "5.0"     # 用户目录查找
+globset = "0.4"         # 文件模式匹配
+notify = "6.1"          # 文件系统变化通知
+
+# 日志和错误处理
+log = "0.4"
+env_logger = "0.10"
+anyhow = "1.0"          # 错误处理
+thiserror = "1.0"       # 错误定义
+
+# 插件系统支持
+dlopen = "0.1"          # 动态库加载
+async-trait = "0.1"     # 异步特性支持
+lazy_static = "1.4"     # 延迟静态初始化
+
+dirs = "5.0.1"
+chrono = "0.4.26"
+
+lru = "0.10.0"
+ratatui = "0.29.0"
+
+[build-dependencies]
+cc = "1.0"              # 用于编译C代码
+
+[features]
+default = []
+neovim-compat = []      # 用于启用Neovim兼容功能
