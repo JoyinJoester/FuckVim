@@ -740,8 +740,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Push 完成
 		if msg.err != nil {
 			errStr := msg.err.Error()
-			if len(errStr) > 50 { errStr = errStr[:47] + "..." }
-			m.statusMsg = "❌ Push 失败: " + errStr
+			
+			// 智能诊断：如果是因为需要认证而失败
+			if strings.Contains(errStr, "terminal prompts disabled") || strings.Contains(errStr, "authentication failed") {
+				m.statusMsg = "🔑 认证失败! 请在终端手动运行 'git push' 一次以保存凭据。"
+			} else {
+				if len(errStr) > 50 { errStr = errStr[:47] + "..." }
+				m.statusMsg = "❌ Push 失败: " + errStr
+			}
 		} else {
 			m.statusMsg = "✅ Push Complete"
 		}
