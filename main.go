@@ -70,11 +70,13 @@ func (m Mode) String() string {
 	}
 }
 
-// FileTree 文件树组件
-type FileTree struct {
-	entries   []FileEntry // 文件列表
-	cursor    int         // 当前选中的索引
-	rootPath  string      // 根目录路径
+// FileTreeModel 文件树组件
+type FileTreeModel struct {
+	rootPath   string
+	cursor     int
+	offset     int // 滚动偏移量
+	Entries    []FileEntry
+	IsLoading  bool // 是否正在加载
 }
 
 // FileEntry 文件条目
@@ -119,6 +121,10 @@ type GitModel struct {
 	Cursor   int
 	RepoPath string
 	IsRepo   bool // 是否是有效的 Git 仓库
+	IsLoading bool // 是否正在加载
+	Branch    string
+	Ahead     int
+	Behind    int
 }
 
 // =============================================================================
@@ -259,7 +265,7 @@ type Model struct {
 
 	// 文件树侧边栏
 	showSidebar bool
-	fileTree    FileTree
+	fileTree    FileTreeModel
 
 	// Git 面板
 	// 注意：现在 sidebar 和 git 可以同时显示
@@ -300,6 +306,8 @@ func initialModel() Model {
 		filename = os.Args[1]
 	}
 
+	cwd, _ := os.Getwd()
+
 	m := Model{
 		// 初始化空缓冲区，至少有一行
 		lines:     []string{""},
@@ -310,81 +318,229 @@ func initialModel() Model {
 		statusMsg: "欢迎使用 FuckVim! 按 'i' 插入, :w 保存, :q 退出",
 		width:     80,
 		height:    24,
+		fileTree: FileTreeModel{
+			rootPath:  cwd,
+			IsLoading: true, // 标记为正在加载
+		},
+		git: GitModel{
+			IsLoading: true, // 标记为正在加载
+		},
 	}
-
-	// 如果指定了文件名，尝试加载文件内容
-	if filename != "" {
-		m.loadFile()
-	}
-
-	// 初始化文件树 (加载当前目录)
-	cwd, _ := os.Getwd()
-	m.fileTree.rootPath = cwd
-	m.loadFileTree(cwd)
-
-	// 初始化 Git 状态
-	m.syncGitStatus()
-
-	// 加载 WASM 插件
-	m.loadPlugin()
 
 	return m
 }
 
-// loadFile 从磁盘加载文件内容
-func (m *Model) loadFile() {
-	if m.filename == "" {
-		return
-	}
+// -----------------------------------------------------------------------------
+// 异步加载命令 (Async Loader Commands)
+// -----------------------------------------------------------------------------
 
-	content, err := os.ReadFile(m.filename)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// 文件不存在，创建新文件
-			m.statusMsg = fmt.Sprintf("[新文件] %s", m.filename)
-			m.lines = []string{""}
-		} else {
-			m.statusMsg = fmt.Sprintf("⚠ 读取文件失败: %v", err)
+// 消息定义
+type fileLoadedMsg struct {
+	content []string
+	err     error
+}
+
+type directoryLoadedMsg struct {
+	entries []FileEntry
+	err     error
+}
+
+type gitStatusMsg struct {
+	isRepo bool
+	files  []GitFile
+	err    error
+	branch string
+	ahead  int
+	behind int
+}
+
+type pluginLoadedMsg struct {
+	plugin *extism.Plugin
+	err    error
+}
+
+// loadFileCmd 异步加载文件
+func loadFileCmd(filename string) tea.Cmd {
+	return func() tea.Msg {
+		if filename == "" {
+			return nil
 		}
-		return
+		content, err := os.ReadFile(filename)
+		if err != nil {
+			return fileLoadedMsg{err: err}
+		}
+		text := string(content)
+		text = strings.ReplaceAll(text, "\r\n", "\n")
+		text = strings.ReplaceAll(text, "\r", "\n")
+		lines := strings.Split(text, "\n")
+		if len(lines) == 0 {
+			lines = []string{""}
+		}
+		return fileLoadedMsg{content: lines}
 	}
+}
 
-	// 将文件内容分割成行
-	text := string(content)
-	// 处理不同的换行符
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\r", "\n")
-	
-	m.lines = strings.Split(text, "\n")
-	
-	// 确保至少有一行
-	if len(m.lines) == 0 {
-		m.lines = []string{""}
+// loadDirectoryCmd 异步加载目录
+func loadDirectoryCmd(path string) tea.Cmd {
+	return func() tea.Msg {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return directoryLoadedMsg{err: err}
+		}
+
+		var fileEntries []FileEntry
+		for _, e := range entries {
+			// 忽略隐藏文件 (.git, .vscode 等)
+			if strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+
+			entry := FileEntry{
+				name:  e.Name(),
+				path:  filepath.Join(path, e.Name()),
+				isDir: e.IsDir(),
+			}
+
+			if !e.IsDir() {
+				// 获取文件大小 (仅显示用，暂时不存)
+				_ = info.Size()
+			}
+			fileEntries = append(fileEntries, entry)
+		}
+
+		// 排序: 文件夹在前，且按名称排序
+		sort.Slice(fileEntries, func(i, j int) bool {
+			if fileEntries[i].isDir != fileEntries[j].isDir {
+				return fileEntries[i].isDir
+			}
+			return fileEntries[i].name < fileEntries[j].name
+		})
+
+		return directoryLoadedMsg{entries: fileEntries}
 	}
+}
 
-	// ----------------------------------------------------
-	// 初始化语法高亮缓存
-	// ----------------------------------------------------
-	// 1. Lexer
-	m.cachedLexer = lexers.Match(m.filename)
-	if m.cachedLexer == nil {
-		m.cachedLexer = lexers.Analyse(text)
+// checkGitStatusCmd 异步检查 Git 状态
+func checkGitStatusCmd() tea.Cmd {
+	return func() tea.Msg {
+		// 1. 检查是否是 Git 仓库
+		checkCmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+		if err := checkCmd.Run(); err != nil {
+			return gitStatusMsg{isRepo: false}
+		}
+
+		// 2. 获取状态
+		cmd := exec.Command("git", "status", "--porcelain")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return gitStatusMsg{err: err}
+		}
+
+		var gitFiles []GitFile
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			if len(line) < 4 {
+				continue
+			}
+
+			code := line[:2]
+			path := strings.TrimSpace(line[3:])
+			
+			// 去除路径中的引号 (如果文件名包含空格)
+			path = strings.Trim(path, "\"")
+
+			var status GitStatus
+			staged := false
+
+			// 解析状态码 (X:Index, Y:WorkTree)
+			x := code[0]
+			y := code[1]
+
+			if x != ' ' && x != '?' {
+				staged = true
+			}
+
+			if x == '?' && y == '?' {
+				status = StatusUntracked
+			} else if x == 'A' || y == 'A' {
+				status = StatusAdded
+			} else if x == 'D' || y == 'D' {
+				status = StatusDeleted
+			} else if x == 'M' || y == 'M' {
+				status = StatusModified
+			} else {
+				status = StatusUnmodified
+			}
+
+			gitFiles = append(gitFiles, GitFile{
+				Path:   path,
+				Status: status,
+				Staged: staged,
+			})
+		}
+		
+		// 3. 获取分支信息
+		branch := ""
+		ahead := 0
+		behind := 0
+		
+		branchCmd := exec.Command("git", "symbolic-ref", "--short", "HEAD")
+		if out, err := branchCmd.Output(); err == nil {
+			branch = strings.TrimSpace(string(out))
+		} else {
+			// Detached HEAD or error
+			branch = "HEAD"
+		}
+		
+		// 4. 获取 Ahead/Behind (如果有关联上游)
+		countCmd := exec.Command("git", "rev-list", "--left-right", "--count", "HEAD...@{u}")
+		if out, err := countCmd.Output(); err == nil {
+			fields := strings.Fields(string(out))
+			if len(fields) >= 2 {
+				fmt.Sscanf(fields[0], "%d", &ahead)
+				fmt.Sscanf(fields[1], "%d", &behind)
+			}
+		}
+
+		return gitStatusMsg{
+			isRepo: true, 
+			files: gitFiles,
+			branch: branch,
+			ahead:  ahead,
+			behind: behind,
+		}
 	}
-	if m.cachedLexer == nil {
-		m.cachedLexer = lexers.Fallback
+}
+
+// loadPluginCmd 异步加载 WASM 插件
+func loadPluginCmd() tea.Cmd {
+	return func() tea.Msg {
+		// 插件路径 (硬编码示例，实际应从配置读取)
+		pluginPath := "plugin.wasm"
+		
+		if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
+			return nil // 插件不存在，静默失败
+		}
+
+		manifest := extism.Manifest{
+			Wasm: []extism.Wasm{
+				extism.WasmFile{Path: pluginPath},
+			},
+		}
+
+		ctx := context.Background()
+		plugin, err := extism.NewPlugin(ctx, manifest, extism.PluginConfig{}, nil)
+		if err != nil {
+			return pluginLoadedMsg{err: err}
+		}
+
+		return pluginLoadedMsg{plugin: plugin}
 	}
-	m.cachedLexer = chroma.Coalesce(m.cachedLexer)
-
-	// 2. Style
-	m.cachedStyle = styles.Get("dracula")
-	if m.cachedStyle == nil {
-		m.cachedStyle = styles.Fallback
-	}
-
-	// 3. Formatter
-	m.cachedFormatter = formatters.TTY256
-
-	m.statusMsg = fmt.Sprintf("\"%s\" %d 行已读取", m.filename, len(m.lines))
 }
 
 // saveFile 保存文件到磁盘
@@ -402,119 +558,11 @@ func (m *Model) saveFile() error {
 	return nil
 }
 
-// loadFileTree 加载指定路径的文件列表
-func (m *Model) loadFileTree(path string) {
-	m.fileTree.entries = []FileEntry{}
-	m.fileTree.cursor = 0
-	
-	// 更新当前浏览路径
-	m.fileTree.rootPath = path
-
-	// 读取目录内容
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		m.statusMsg = fmt.Sprintf("⚠ 读取目录失败: %v", err)
-		return
-	}
-
-	// 分离目录和文件
-	var dirs, files []FileEntry
-	for _, entry := range entries {
-		// 跳过隐藏文件（以.开头）
-		if strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-
-		fe := FileEntry{
-			name:  entry.Name(),
-			path:  filepath.Join(path, entry.Name()),
-			isDir: entry.IsDir(),
-		}
-
-		if entry.IsDir() {
-			dirs = append(dirs, fe)
-		} else {
-			files = append(files, fe)
-		}
-	}
-
-	// 排序：目录在前，文件在后，各自按名称排序
-	sort.Slice(dirs, func(i, j int) bool { return dirs[i].name < dirs[j].name })
-	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
-
-	m.fileTree.entries = append(dirs, files...)
-}
-
-// ... syncGitStatus ...
-// syncGitStatus 同步 Git 仓库状态
-func (m *Model) syncGitStatus() {
-	// 获取当前工作目录
-	cwd, err := os.Getwd()
-	if err != nil {
-		return
-	}
-	m.git.RepoPath = cwd
-
-	// 执行 git status --porcelain
-	cmd := exec.Command("git", "status", "--porcelain")
-	cmd.Dir = cwd
-	output, err := cmd.Output()
-	if err != nil {
-		// 假如错误码是 128 (不是 git 仓库) 或其他错误
-		m.git.IsRepo = false
-		m.git.Files = []GitFile{}
-		return
-	}
-
-	m.git.IsRepo = true
-	// 解析输出
-	var gitFiles []GitFile
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		if len(line) < 4 {
-			continue
-		}
-
-		// XY PATH
-		// X = index stats, Y = worktree status
-		x := line[0]
-		y := line[1]
-		file := strings.TrimSpace(line[3:])
-
-		// 简单的状态映射 logic
-		var status GitStatus
-		staged := false
-
-		if x != ' ' && x != '?' {
-			staged = true
-			if x == 'M' { status = StatusModified }
-			if x == 'A' { status = StatusAdded }
-			if x == 'D' { status = StatusDeleted }
-		} else {
-			if y == 'M' { status = StatusModified }
-			if y == 'D' { status = StatusDeleted }
-			if y == '?' { status = StatusUntracked }
-		}
-
-		// 如果既有暂存又有修改（部分暂存），在这个简单模型中优先显示暂存
-		// 实际上我们可能需要更复杂的状态，但 MVP 够用了
-
-		gitFiles = append(gitFiles, GitFile{
-			Path:   file,
-			Status: status,
-			Staged: staged,
-		})
-	}
-
-	m.git.Files = gitFiles
-}
-
 // stageGitFile 暂存文件
 func (m *Model) stageGitFile(file string) {
 	cmd := exec.Command("git", "add", file)
 	cmd.Dir = m.git.RepoPath
 	cmd.Run()
-	m.syncGitStatus()
 }
 
 // unstageGitFile 取消暂存文件
@@ -522,7 +570,6 @@ func (m *Model) unstageGitFile(file string) {
 	cmd := exec.Command("git", "reset", file)
 	cmd.Dir = m.git.RepoPath
 	cmd.Run()
-	m.syncGitStatus()
 }
 
 // commitGit 提交更改
@@ -533,42 +580,11 @@ func (m *Model) commitGit(msg string) error {
 	if err != nil {
 		return fmt.Errorf("提交失败: %v\n%s", err, string(output))
 	}
-	m.syncGitStatus()
+	// 不再同步调用 syncGitStatus，而是由调用方(executeCommand/Update)负责 triggering reload
 	return nil
 }
 
-// loadPlugin 加载 Extism WASM 插件
-//
-// 为什么在这里加载？
-// 我们在初始化时加载一次，而不是每次调用时加载，以避免性能开销。
-// 插件实例在整个编辑器生命周期中复用。
-func (m *Model) loadPlugin() {
-	// 检查插件文件是否存在
-	if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
-		m.pluginError = fmt.Errorf("插件文件不存在: %s (请先运行 'make build-plugin')", pluginPath)
-		return
-	}
 
-	// 创建 Extism 插件清单
-	// Wasm 字段指定要加载的 WASM 模块
-	manifest := extism.Manifest{
-		Wasm: []extism.Wasm{
-			extism.WasmFile{Path: pluginPath},
-		},
-	}
-
-	// 创建插件实例
-	// context.Background() 用于插件的生命周期管理
-	// extism.PluginConfig{} 使用默认配置
-	ctx := context.Background()
-	plugin, err := extism.NewPlugin(ctx, manifest, extism.PluginConfig{}, nil)
-	if err != nil {
-		m.pluginError = fmt.Errorf("加载插件失败: %w", err)
-		return
-	}
-
-	m.plugin = plugin
-}
 
 // =============================================================================
 // Bubble Tea 接口实现
@@ -576,7 +592,7 @@ func (m *Model) loadPlugin() {
 
 // Init 返回初始命令
 func (m Model) Init() tea.Cmd {
-	// 1. 尝试获取真实终端尺寸
+	// 1. 基本 UI 初始化
 	w, h, err := term.GetSize(int(os.Stdout.Fd()))
 	var resizeCmd tea.Cmd
 	if err == nil {
@@ -585,18 +601,88 @@ func (m Model) Init() tea.Cmd {
 		}
 	}
 
-	// 2. 组合命令: 清屏 + 进入AltScreen + 强制发送尺寸
-	// 这样可以确保启动时布局正确，不会默认成 80x24
-	cmds := []tea.Cmd{tea.ClearScreen, tea.EnterAltScreen}
+	cmds := []tea.Cmd{
+		tea.EnterAltScreen,
+		// 2. 并行启动异步加载任务
+		loadDirectoryCmd(m.fileTree.rootPath),
+		checkGitStatusCmd(),
+		loadPluginCmd(),
+	}
+	
+	if m.filename != "" {
+		cmds = append(cmds, loadFileCmd(m.filename))
+	}
+	
 	if resizeCmd != nil {
 		cmds = append(cmds, resizeCmd)
 	}
+	
+	// 如果之前有正在监听的 push 通道 (虽然 Init 只跑一次，但作为范例)
+	if m.pushChan != nil {
+		cmds = append(cmds, waitForPushOutput(m.pushChan))
+	}
+
 	return tea.Batch(cmds...)
 }
 
 // Update 处理消息并更新模型
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	
+	// --- 异步加载完成的消息 ---
+	case fileLoadedMsg:
+		if msg.err != nil {
+			m.statusMsg = fmt.Sprintf("无法读取文件: %v", msg.err)
+		} else {
+			m.lines = msg.content
+			// 初始化高亮
+			m.cachedLexer = lexers.Match(m.filename)
+			if m.cachedLexer == nil {
+				m.cachedLexer = lexers.Fallback
+			}
+			m.cachedLexer = chroma.Coalesce(m.cachedLexer)
+			
+			// 初始化样式和格式化器
+			if m.cachedStyle == nil {
+				m.cachedStyle = styles.Get("dracula")
+				if m.cachedStyle == nil { m.cachedStyle = styles.Fallback }
+			}
+			if m.cachedFormatter == nil {
+				m.cachedFormatter = formatters.TTY256
+			}
+		}
+		return m, nil
+
+	case directoryLoadedMsg:
+		m.fileTree.IsLoading = false
+		if msg.err != nil {
+			m.statusMsg = fmt.Sprintf("无法读取目录: %v", msg.err)
+		} else {
+			m.fileTree.Entries = msg.entries
+		}
+		return m, nil
+
+	case gitStatusMsg:
+		m.git.IsLoading = false
+		if msg.err != nil {
+			m.statusMsg = fmt.Sprintf("Git错误: %v", msg.err)
+		} else {
+			m.git.IsRepo = msg.isRepo
+			m.git.Files = msg.files
+			m.git.Branch = msg.branch
+			m.git.Ahead = msg.ahead
+			m.git.Behind = msg.behind
+		}
+		return m, nil
+
+	case pluginLoadedMsg:
+		if msg.err != nil {
+			m.pluginError = msg.err
+		} else {
+			m.plugin = msg.plugin
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		// 检查尺寸是否真正改变
 		sizeChanged := msg.Width != m.width || msg.Height != m.height
@@ -660,8 +746,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "✅ Push Complete"
 		}
 		m.pushChan = nil // 清理通道
-		m.syncGitStatus()
-		return m, nil
+		m.git.IsLoading = true
+		return m, checkGitStatusCmd()
+
+	case stageAllDoneMsg:
+		if msg.err != nil {
+			m.statusMsg = fmt.Sprintf("❌ Staging 失败: %v", msg.err)
+			return m, nil
+		}
+		// Staging 成功，进入提交模式
+		m.mode = CommandMode
+		m.commandBuffer = "commit "
+		m.statusMsg = "🚀 已暂存(0s)! 请输入提交信息:"
+		m.focus = FocusCommand
+		// 同时后台刷新 Git 状态 (让文件变绿)
+		return m, checkGitStatusCmd()
 	}
 
 	return m, nil
@@ -870,6 +969,9 @@ func (m Model) handleGitMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.stageGitFile(file.Path)
 			}
+			// 立即触发异步状态刷新
+			m.git.IsLoading = true
+			return m, checkGitStatusCmd()
 		}
 	case "c":
 		// 手动提交: 先用空格键 stage 单个文件，然后 c 提交
@@ -879,20 +981,13 @@ func (m Model) handleGitMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focus = FocusCommand
 	
 	case "C": // Shift+C: 智能提交 (Stage All + Commit)
-		// 1. Auto-Stage 所有文件
-		exec.Command("git", "add", "-A").Run()
-		
-		// 2. 刷新状态 (让用户看到所有文件变绿)
-		m.syncGitStatus()
-		
-		// 3. 进入提交消息输入
-		m.mode = CommandMode
-		m.commandBuffer = "commit "
-		m.statusMsg = "🚀 已暂存所有文件! 请输入提交信息:"
-		m.focus = FocusCommand
+		// 1. Auto-Stage 所有文件 (异步)
+		m.statusMsg = "🚀 Staging changes..."
+		return m, stageAllCmd()
 	
 	case "r":
-		m.syncGitStatus()
+		m.git.IsLoading = true
+		return m, checkGitStatusCmd()
 
 	case "i":
 		// 如果不是 Git 仓库，允许初始化
@@ -912,35 +1007,11 @@ func (m Model) handleGitMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		
 		// 构建 .git/config 路径
 		configPath := filepath.Join(m.fileTree.rootPath, ".git", "config")
-		content, err := os.ReadFile(configPath)
-		if err != nil {
-			m.statusMsg = fmt.Sprintf("⚠ 读取配置失败: %v", err)
-			return m, nil
-		}
-		
-		// 加载到编辑器
-		text := string(content)
-		text = strings.ReplaceAll(text, "\r\n", "\n")
-		text = strings.ReplaceAll(text, "\r", "\n")
-		m.lines = strings.Split(text, "\n")
-		if len(m.lines) == 0 {
-			m.lines = []string{""}
-		}
-		m.filename = configPath
-		m.cursorX = 0
-		m.cursorY = 0
-		
-		// 重新初始化语法高亮 (INI 格式)
-		m.cachedLexer = lexers.Match(m.filename)
-		if m.cachedLexer == nil {
-			m.cachedLexer = lexers.Fallback
-		}
-		m.cachedLexer = chroma.Coalesce(m.cachedLexer)
-		
-		// 切换焦点到编辑器
+		// 异步加载:
 		m.focus = FocusEditor
 		m.mode = NormalMode
 		m.statusMsg = "📝 编辑 Git 配置 (按 :w 保存)"
+		return m, loadFileCmd(configPath)
 
 	case "P": // Shift+P: 异步推送到远程 (流式反馈)
 		if !m.git.IsRepo {
@@ -956,7 +1027,68 @@ func (m Model) handleGitMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		)
 
 	case "enter":
-		m.statusMsg = "Diff 功能暂未实现"
+		// 查看 Diff
+		if len(m.git.Files) == 0 {
+			return m, nil
+		}
+		
+		file := m.git.Files[m.git.Cursor]
+		var cmd *exec.Cmd
+		
+		// 根据文件状态决定 diff 命令
+		if file.Status == StatusUntracked {
+			// Untracked 文件直接显示内容
+			// 实际上 git diff 无法显示 untracked，我们直接读取文件
+			// 或者 git diff --no-index /dev/null path/to/file (有点复杂)
+			// 简单起见，直接读取文件内容
+			filepath := filepath.Join(m.fileTree.rootPath, file.Path)
+			content, err := os.ReadFile(filepath)
+			if err != nil {
+				m.statusMsg = fmt.Sprintf("⚠ 无法读取文件: %v", err)
+				return m, nil
+			}
+			m.lines = strings.Split(string(content), "\n")
+			m.filename = file.Path
+		} else {
+			// 已跟踪文件
+			args := []string{"diff", "--no-color"}
+			if file.Staged {
+				args = append(args, "--cached")
+			}
+			args = append(args, "--", file.Path)
+			
+			cmd = exec.Command("git", args...)
+			cmd.Dir = m.fileTree.rootPath
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				m.statusMsg = fmt.Sprintf("⚠ Diff 失败: %v", err)
+				return m, nil
+			}
+			
+			text := string(output)
+			if text == "" {
+				text = "(文件为空或无差异)"
+			}
+			text = strings.ReplaceAll(text, "\r\n", "\n")
+			m.lines = strings.Split(text, "\n")
+			m.filename = file.Path + ".diff" // 伪造扩展名以强制 Diff 高亮
+		}
+		
+		// 重置光标
+		m.cursorX = 0
+		m.cursorY = 0
+		
+		// 设置 Diff 语法高亮
+		m.cachedLexer = lexers.Get("diff")
+		if m.cachedLexer == nil {
+			m.cachedLexer = lexers.Fallback
+		}
+		m.cachedLexer = chroma.Coalesce(m.cachedLexer)
+		
+		// 切换焦点
+		m.focus = FocusEditor
+		m.mode = NormalMode
+		m.statusMsg = fmt.Sprintf("👀 查看 Diff: %s", file.Path)
 	}
 	return m, nil
 }
@@ -1039,7 +1171,7 @@ func (m *Model) executeCommand() tea.Cmd {
 				m.statusMsg = fmt.Sprintf("\"%s\" %d 行已写入", m.filename, len(m.lines))
 				// 保存后自动刷新 Git 状态
 				if m.showGit {
-					m.syncGitStatus()
+					return checkGitStatusCmd()
 				}
 			}
 		}
@@ -1068,28 +1200,32 @@ func (m *Model) executeCommand() tea.Cmd {
 			if m.fileTree.rootPath == "" {
 				m.fileTree.rootPath, _ = os.Getwd()
 			}
-			m.loadFileTree(m.fileTree.rootPath)
+			m.fileTree.IsLoading = true
+			m.fileTree.Entries = []FileEntry{}
+			m.fileTree.cursor = 0
 			m.focus = FocusFileTree
 			m.statusMsg = "焦点: 文件树 | j/k=移动, Enter=打开/进入, Backspace=返回上一级"
+			return tea.Batch(loadDirectoryCmd(m.fileTree.rootPath), m.forceRefresh())
 		} else {
 			m.focus = FocusEditor
 			m.statusMsg = ""
+			return m.forceRefresh()
 		}
-		return m.forceRefresh() // 模拟 Resize 事件以强制修正布局
 		
 	case "git":
 		// 切换 Git 面板
 		m.showGit = !m.showGit
 		m.syncSizes() // 立即同步布局尺寸
 		if m.showGit {
-			m.syncGitStatus()
 			m.focus = FocusGit
 			m.statusMsg = "焦点: Git | Ctrl+H=文件树 Ctrl+L=编辑器"
+			m.git.IsLoading = true
+			return tea.Batch(checkGitStatusCmd(), m.forceRefresh())
 		} else {
 			m.focus = FocusEditor
 			m.statusMsg = ""
+			return m.forceRefresh() // 模拟 Resize 事件以强制修正布局
 		}
-		return m.forceRefresh() // 模拟 Resize 事件以强制修正布局
 
 	case "ai":
 		// AI 聊天占位
@@ -1116,12 +1252,12 @@ func (m *Model) executeCommand() tea.Cmd {
 					m.statusMsg = fmt.Sprintf("⚠ 提交失败: %s", strings.TrimSpace(string(output)))
 				} else {
 					m.statusMsg = fmt.Sprintf("✓ 已提交: %s", message)
-					// 刷新 Git 状态
-					m.syncGitStatus()
 					// 如果 Git 面板打开，返回焦点
 					if m.showGit {
 						m.focus = FocusGit
 					}
+					// 刷新 Git 状态
+					return checkGitStatusCmd()
 				}
 			}
 		} else {
@@ -1159,9 +1295,10 @@ func (m Model) handleFileTreeMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.statusMsg = fmt.Sprintf("✓ Git 仓库已初始化: %s", targetDir)
 				// 刷新并重置
-				m.syncGitStatus()
+				m.git.IsLoading = true
 				m.selectingGitRoot = false
 				m.focus = FocusGit
+				return m, checkGitStatusCmd() 
 			}
 			return m, nil
 		
@@ -1179,7 +1316,7 @@ func (m Model) handleFileTreeMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "j", "down":
 		// 向下移动
-		if m.fileTree.cursor < len(m.fileTree.entries)-1 {
+		if m.fileTree.cursor < len(m.fileTree.Entries)-1 {
 			m.fileTree.cursor++
 		}
 
@@ -1191,25 +1328,33 @@ func (m Model) handleFileTreeMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "enter":
 		// 打开选中的文件或目录
-		if len(m.fileTree.entries) > 0 {
-			entry := m.fileTree.entries[m.fileTree.cursor]
+		if len(m.fileTree.Entries) > 0 {
+			entry := m.fileTree.Entries[m.fileTree.cursor]
 			if entry.isDir {
-				// 进入目录
-				m.loadFileTree(entry.path)
+				// 进入目录 (异步)
+				m.fileTree.rootPath = entry.path
+				m.fileTree.IsLoading = true
+				m.fileTree.Entries = []FileEntry{} // 清空旧列表
+				m.fileTree.cursor = 0
+				return m, loadDirectoryCmd(entry.path)
 			} else {
-				// 文件：加载到编辑器
+				// 文件：加载到编辑器 (异步)
 				m.filename = entry.path
-				m.loadFile()
 				// 切换焦点到编辑器，但保持侧边栏可见！
 				m.focus = FocusEditor
 				m.mode = NormalMode
+				return m, loadFileCmd(entry.path)
 			}
 		}
 
 	case "backspace", "-":
-		// 返回上一级目录
+		// 返回上一级目录 (异步)
 		parentDir := filepath.Dir(m.fileTree.rootPath)
-		m.loadFileTree(parentDir)
+		m.fileTree.rootPath = parentDir
+		m.fileTree.IsLoading = true
+		m.fileTree.Entries = []FileEntry{} // 清空旧列表
+		m.fileTree.cursor = 0
+		return m, loadDirectoryCmd(parentDir)
 
 	case "esc", "q":
 		// 切换焦点到编辑器（不关闭侧边栏）
@@ -1506,6 +1651,21 @@ func waitForPushOutput(sub chan string) tea.Cmd {
 			return nil // 通道关闭，停止监听
 		}
 		return pushProgressMsg(data)
+	}
+}
+
+// stageAllDoneMsg 表示所有文件暂存完成
+type stageAllDoneMsg struct{ err error }
+
+// stageAllCmd 异步执行 git add -A
+func stageAllCmd() tea.Cmd {
+	return func() tea.Msg {
+		// 这里我们只需要执行命令，不需要返回输出（除非报错）
+		cmd := exec.Command("git", "add", "-A")
+		if err := cmd.Run(); err != nil {
+			return stageAllDoneMsg{err: err}
+		}
+		return stageAllDoneMsg{err: nil}
 	}
 }
 
@@ -1891,7 +2051,7 @@ func (m Model) renderSidebar(width, height int) string {
 	visibleHeight := contentHeight
 	if visibleHeight < 0 { visibleHeight = 0 }
 
-	for i, entry := range m.fileTree.entries {
+	for i, entry := range m.fileTree.Entries {
 		if i >= visibleHeight {
 			break
 		}
@@ -1965,6 +2125,32 @@ func (m Model) renderGit(width, height int) string {
 
 		isActive := m.focus == FocusGit
 		return renderWindow(strings.Join(lines, "\n"), "Git-NoRepo", isActive, width, height, false)
+	}
+
+	if len(m.git.Files) == 0 {
+		// Sync Dashboard
+		output := "\n"
+		output += fmt.Sprintf("  ✨ On branch: %s\n", lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render(m.git.Branch))
+		output += "  Working Tree Clean\n\n"
+		
+		if m.git.Ahead == 0 && m.git.Behind == 0 {
+			output += "  ✅ Up to date with remote"
+		} else {
+			if m.git.Ahead > 0 {
+				output += fmt.Sprintf("  🚀 Ahead: %d commit(s)\n", m.git.Ahead)
+			}
+			if m.git.Behind > 0 {
+				output += fmt.Sprintf("  ⬇️ Behind: %d commit(s)\n", m.git.Behind)
+			}
+			output += "\n  (Press 'Shift+P' to Push)"
+		}
+		
+		// 填充空白行以保持布局一致 (可选)
+		// 这里我们直接返回 lipgloss 渲染结果，renderWindow 会处理边框，
+		// 但高度填充需要自己做吗？ renderWindow 接受 content string.
+		// 为了垂直对齐，我们可以 append plain newlines to output
+		
+		return renderWindow(output, "Git-Clean", m.focus == FocusGit, width, height, false)
 	}
 
 	// Git Repo Content
