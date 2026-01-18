@@ -25,6 +25,7 @@ import (
 	extism "github.com/extism/go-sdk"
 	"golang.org/x/term"
 	"github.com/atotto/clipboard" // 系统剪贴板支持
+	"github.com/charmbracelet/bubbles/textinput"
 
 	// Chroma 语法高亮库
 	"github.com/alecthomas/chroma/v2"
@@ -79,7 +80,29 @@ type FileTreeModel struct {
 	offset     int // 滚动偏移量
 	Entries    []FileEntry
 	IsLoading  bool // 是否正在加载
+	
+	// Yazi-style modal operations
+	State     TreeState
+	Action    TreeAction
+	Input     textinput.Model
+	Selected  string // File targeted for action
 }
+
+// TreeState 文件树状态
+type TreeState int
+const (
+	TreeNormal TreeState = iota
+	TreeInput             // Typing a filename
+	TreeConfirmDelete     // Asking "Are you sure?"
+)
+
+// TreeAction 文件操作类型
+type TreeAction int
+const (
+	ActionNone TreeAction = iota
+	ActionCreate
+	ActionRename
+)
 
 // FileEntry 文件条目
 type FileEntry struct {
@@ -236,6 +259,8 @@ type EditorPane struct {
 	Filename string
 	CursorX  int
 	CursorY  int
+	Width    int // Allocated outer width
+	Height   int // Allocated outer height
 }
 
 // SplitType 分屏类型
@@ -331,6 +356,12 @@ func initialModel() Model {
 		initialPane.Filename = os.Args[1]
 	}
 
+	// Initialize textinput for file tree
+	ti := textinput.New()
+	ti.Placeholder = "Name..."
+	ti.CharLimit = 156
+	ti.Width = 20
+
 	m := Model{
 		panes:      []*EditorPane{initialPane},
 		activePane: 0,
@@ -343,6 +374,9 @@ func initialModel() Model {
 		fileTree: FileTreeModel{
 			rootPath:  cwd,
 			IsLoading: true,
+			State:     TreeNormal,
+			Action:    ActionNone,
+			Input:     ti,
 		},
 		git: GitModel{
 			IsLoading: true,
@@ -1403,16 +1437,9 @@ func (m *Model) executeCommand() tea.Cmd {
 		return tea.Quit
 
 	case "tree", "e":
-		// ... existing logic ...
-	// ... (rest of cases need careful check if they used m.filename etc)
-
-	// Since we are replacing the whole switch block or parts, let's keep it safe.
-	// Actually, replace the whole function content for clarity? No, replace specific blocks.
-	// But :vsp is prefix.
-	// I will replace only the top part and 'q', 'w' logic.
-
-    // ... Copying existing rest cases ...
-		// m.syncSizes() called below
+		// 切换文件树侧边栏
+		m.showSidebar = !m.showSidebar
+		m.syncSizes()
 		if m.showSidebar {
 			if m.fileTree.rootPath == "" {
 				m.fileTree.rootPath, _ = os.Getwd()
@@ -1421,7 +1448,7 @@ func (m *Model) executeCommand() tea.Cmd {
 			m.fileTree.Entries = []FileEntry{}
 			m.fileTree.cursor = 0
 			m.focus = FocusFileTree
-			m.statusMsg = "焦点: 文件树 | j/k=移动, Enter=打开/进入, Backspace=返回上一级"
+			m.statusMsg = "焦点: 文件树 | j/k=移动, Enter=打开/进入, a=新建, d=删除, r=重命名"
 			return tea.Batch(loadDirectoryCmd(m.fileTree.rootPath), m.forceRefresh())
 		} else {
 			m.focus = FocusEditor
@@ -1505,67 +1532,158 @@ func (m Model) forceRefresh() tea.Cmd {
 
 // handleFileTreeMode 处理文件树模式下的按键
 func (m Model) handleFileTreeMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// 如果正在选择 Git 初始化目录
+	// Handle based on current state
+	switch m.fileTree.State {
+	
+	// =========================================================================
+	// INPUT MODE: Typing a filename (for Create or Rename)
+	// =========================================================================
+	case TreeInput:
+		switch msg.Type {
+		case tea.KeyEsc:
+			// Cancel input
+			m.fileTree.State = TreeNormal
+			m.fileTree.Action = ActionNone
+			m.fileTree.Input.Blur()
+			m.statusMsg = "已取消"
+			return m, nil
+			
+		case tea.KeyEnter:
+			// Execute action
+			name := m.fileTree.Input.Value()
+			if name == "" {
+				m.statusMsg = "⚠ 名称不能为空"
+				m.fileTree.State = TreeNormal
+				m.fileTree.Input.Blur()
+				return m, nil
+			}
+			
+			targetPath := filepath.Join(m.fileTree.rootPath, name)
+			
+			if m.fileTree.Action == ActionCreate {
+				// Smart detection: if ends with /, create directory
+				if strings.HasSuffix(name, "/") {
+					err := os.MkdirAll(targetPath, 0755)
+					if err != nil {
+						m.statusMsg = fmt.Sprintf("⚠ 创建目录失败: %v", err)
+					} else {
+						m.statusMsg = fmt.Sprintf("✓ 已创建目录: %s", name)
+					}
+				} else {
+					// Create file
+					file, err := os.Create(targetPath)
+					if err != nil {
+						m.statusMsg = fmt.Sprintf("⚠ 创建文件失败: %v", err)
+					} else {
+						file.Close()
+						m.statusMsg = fmt.Sprintf("✓ 已创建文件: %s", name)
+					}
+				}
+			} else if m.fileTree.Action == ActionRename {
+				oldPath := m.fileTree.Selected
+				newPath := filepath.Join(filepath.Dir(oldPath), name)
+				err := os.Rename(oldPath, newPath)
+				if err != nil {
+					m.statusMsg = fmt.Sprintf("⚠ 重命名失败: %v", err)
+				} else {
+					m.statusMsg = fmt.Sprintf("✓ 已重命名: %s", name)
+				}
+			}
+			
+			// Reset state and refresh
+			m.fileTree.State = TreeNormal
+			m.fileTree.Action = ActionNone
+			m.fileTree.Input.Blur()
+			m.fileTree.Input.SetValue("")
+			m.fileTree.IsLoading = true
+			return m, loadDirectoryCmd(m.fileTree.rootPath)
+			
+		default:
+			// Pass to textinput
+			var cmd tea.Cmd
+			m.fileTree.Input, cmd = m.fileTree.Input.Update(msg)
+			return m, cmd
+		}
+	
+	// =========================================================================
+	// CONFIRM DELETE MODE: Asking "Are you sure?"
+	// =========================================================================
+	case TreeConfirmDelete:
+		switch msg.String() {
+		case "y", "Y":
+			// Execute delete
+			err := os.RemoveAll(m.fileTree.Selected)
+			if err != nil {
+				m.statusMsg = fmt.Sprintf("⚠ 删除失败: %v", err)
+			} else {
+				m.statusMsg = fmt.Sprintf("✓ 已删除: %s", filepath.Base(m.fileTree.Selected))
+			}
+			m.fileTree.State = TreeNormal
+			m.fileTree.Selected = ""
+			m.fileTree.IsLoading = true
+			return m, loadDirectoryCmd(m.fileTree.rootPath)
+			
+		case "n", "N", "esc":
+			// Cancel
+			m.fileTree.State = TreeNormal
+			m.fileTree.Selected = ""
+			m.statusMsg = "已取消删除"
+			return m, nil
+		}
+		return m, nil
+	}
+	
+	// =========================================================================
+	// NORMAL MODE: Navigation and action triggers
+	// =========================================================================
+	
+	// Git init selection mode (existing logic)
 	if m.selectingGitRoot {
 		switch msg.String() {
 		case "y":
-			// 确认在此目录 (rootPath) 初始化
 			targetDir := m.fileTree.rootPath
-			
-			// run git init
 			cmd := exec.Command("git", "init", targetDir)
 			cmd.Dir = targetDir
 			if err := cmd.Run(); err != nil {
 				m.statusMsg = fmt.Sprintf("⚠ Git Init 失败: %v", err)
 			} else {
 				m.statusMsg = fmt.Sprintf("✓ Git 仓库已初始化: %s", targetDir)
-				// 刷新并重置
 				m.git.IsLoading = true
 				m.selectingGitRoot = false
 				m.focus = FocusGit
 				return m, checkGitStatusCmd() 
 			}
 			return m, nil
-		
 		case "esc":
-			// 取消
 			m.selectingGitRoot = false
 			m.focus = FocusGit
 			m.statusMsg = "已取消 Git 初始化"
 			return m, nil
 		}
-		// 允许继续导航 (j/k/enter/backspace) 以便选择文件夹
-		// Fallthrough to normal navigation
 	}
 
 	switch msg.String() {
 	case "j", "down":
-		// 向下移动
 		if m.fileTree.cursor < len(m.fileTree.Entries)-1 {
 			m.fileTree.cursor++
 		}
 
 	case "k", "up":
-		// 向上移动
 		if m.fileTree.cursor > 0 {
 			m.fileTree.cursor--
 		}
 
 	case "enter":
-		// 打开选中的文件或目录
 		if len(m.fileTree.Entries) > 0 {
 			entry := m.fileTree.Entries[m.fileTree.cursor]
 			if entry.isDir {
-				// 进入目录 (异步)
 				m.fileTree.rootPath = entry.path
 				m.fileTree.IsLoading = true
-				m.fileTree.Entries = []FileEntry{} // 清空旧列表
+				m.fileTree.Entries = []FileEntry{}
 				m.fileTree.cursor = 0
 				return m, loadDirectoryCmd(entry.path)
 			} else {
-				// 文件：加载到编辑器 (异步)
 				m.panes[m.activePane].Filename = entry.path
-				// 切换焦点到编辑器，但保持侧边栏可见！
 				m.focus = FocusEditor
 				m.mode = NormalMode
 				return m, loadFileCmd(entry.path)
@@ -1573,28 +1691,56 @@ func (m Model) handleFileTreeMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "backspace", "-":
-		// 返回上一级目录 (异步)
 		parentDir := filepath.Dir(m.fileTree.rootPath)
 		m.fileTree.rootPath = parentDir
 		m.fileTree.IsLoading = true
-		m.fileTree.Entries = []FileEntry{} // 清空旧列表
+		m.fileTree.Entries = []FileEntry{}
 		m.fileTree.cursor = 0
 		return m, loadDirectoryCmd(parentDir)
 
+	case "a":
+		// Add file/folder (Yazi style)
+		m.fileTree.State = TreeInput
+		m.fileTree.Action = ActionCreate
+		m.fileTree.Input.SetValue("")
+		m.fileTree.Input.Focus()
+		m.statusMsg = "新建: 输入名称 (以 / 结尾创建目录)"
+		return m, nil
+
+	case "r":
+		// Rename (Yazi style)
+		if len(m.fileTree.Entries) > 0 {
+			entry := m.fileTree.Entries[m.fileTree.cursor]
+			m.fileTree.State = TreeInput
+			m.fileTree.Action = ActionRename
+			m.fileTree.Selected = entry.path
+			m.fileTree.Input.SetValue(entry.name)
+			m.fileTree.Input.Focus()
+			m.statusMsg = fmt.Sprintf("重命名: %s", entry.name)
+		}
+		return m, nil
+
+	case "d":
+		// Delete with confirmation (Yazi style)
+		if len(m.fileTree.Entries) > 0 {
+			entry := m.fileTree.Entries[m.fileTree.cursor]
+			m.fileTree.State = TreeConfirmDelete
+			m.fileTree.Selected = entry.path
+			m.statusMsg = fmt.Sprintf("⚠️ 删除 %s? (y/n)", entry.name)
+		}
+		return m, nil
+
 	case "esc", "q":
-		// 切换焦点到编辑器（不关闭侧边栏）
 		m.focus = FocusEditor
 		m.mode = NormalMode
 		m.statusMsg = "Ctrl+H 返回文件树"
 
 	case ":":
-		// 进入命令模式
 		m.mode = CommandMode
 		m.commandBuffer = ""
 		m.statusMsg = ":"
 	}
 
-	// 如果仍然在选择模式，确保提示信息是最新的（覆盖上面的状态）
 	if m.selectingGitRoot {
 		m.statusMsg = fmt.Sprintf("Navigate to project root, then press 'y' to initialize in: %s", m.fileTree.rootPath)
 	}
@@ -2039,21 +2185,24 @@ func (m *Model) syncSizes() {
 			}
 		}
 
-		pane.Viewport.Width = width
-		pane.Viewport.Height = height
+		// Update pane outer dimensions
+		pane.Width = width
+		pane.Height = height
 		
 		// 如果只有一个 Pane，确保利用剩余的像素 (奇数情况)
-		// 实际上 Viewport 不严格要求像素完美对齐，因为 lipgloss.Place 会处理
-		// 但为了滚动准确，高度最好准确
 		if i == 1 {
 			if m.splitType == VerticalSplit {
-				width = editorTotalWidth - m.panes[0].Viewport.Width - 1
+				width = editorTotalWidth - m.panes[0].Width - 1
 			} else if m.splitType == HorizontalSplit {
-				height = editorTotalHeight - m.panes[0].Viewport.Height - 1
+				height = editorTotalHeight - m.panes[0].Height - 1
 			}
-			pane.Viewport.Width = width
-			pane.Viewport.Height = height
+			pane.Width = width
+			pane.Height = height
 		}
+		
+		// Update Viewport inner dimensions immediately
+		pane.Viewport.Width = width - 2
+		pane.Viewport.Height = height - 2
 	}
 }
 
@@ -2116,16 +2265,17 @@ func (m Model) View() string {
 
 	// 3. 渲染编辑器 (Split View Logic)
 	var editorView string
+	editorHasFocus := m.focus == FocusEditor
 	
 	if len(m.panes) == 0 {
 		editorView = "" // Should not happen
 	} else if len(m.panes) == 1 {
 		// Single Pane
-		editorView = m.renderPane(m.panes[0], editorWidth, editorHeight, m.activePane == 0)
+		editorView = m.renderPane(m.panes[0], editorWidth, editorHeight, editorHasFocus && m.activePane == 0)
 	} else {
 		// Split Pane
-		pane0 := m.renderPane(m.panes[0], m.panes[0].Viewport.Width, m.panes[0].Viewport.Height, m.activePane == 0)
-		pane1 := m.renderPane(m.panes[1], m.panes[1].Viewport.Width, m.panes[1].Viewport.Height, m.activePane == 1)
+		pane0 := m.renderPane(m.panes[0], m.panes[0].Width, m.panes[0].Height, editorHasFocus && m.activePane == 0)
+		pane1 := m.renderPane(m.panes[1], m.panes[1].Width, m.panes[1].Height, editorHasFocus && m.activePane == 1)
 
 		if m.splitType == VerticalSplit {
 			// Add border in between? renderPane already has border.
@@ -2190,13 +2340,14 @@ func renderWindow(content string, title string, isActive bool, width, height int
 		} else {
 			line = ""
 		}
-		// 使用 lipgloss.Width 正确计算带 ANSI 码的宽度
+		
 		lineWidth := lipgloss.Width(line)
 		if lineWidth < innerWidth {
 			line = line + strings.Repeat(" ", innerWidth-lineWidth)
+		} else if lineWidth > innerWidth {
+			// Manual Truncation via Binary Search to preserve ANSI and content
+			line = truncateToWidth(line, innerWidth)
 		}
-		// 注意：不在此处截断，因为截断带 ANSI 码的字符串可能破坏转义序列
-		// 依赖上层渲染函数控制内容宽度
 		paddedLines = append(paddedLines, line)
 	}
 
@@ -2232,32 +2383,79 @@ func renderWindow(content string, title string, isActive bool, width, height int
 	return result.String()
 }
 
-// renderEditor 渲染编辑器区域
+// truncateToWidth truncates a string to visual width w, preserving ANSI codes if possible.
+func truncateToWidth(s string, w int) string {
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	
+	// Convert to runes to handle multi-byte slicing safely
+	// BUT slicing string directly is needed for ANSI check? No, ANSI are bytes.
+	// But lipgloss.Width handles string.
+	// We want to find index k such that Width(s[:k]) <= w and Width(s[:k+1]) > w.
+	// Use binary search on BYTE indices.
+	// Refinement: use range loop to find character boundaries.
+	
+	validIndices := make([]int, 0, len(s))
+	for i := range s {
+		validIndices = append(validIndices, i)
+	}
+	validIndices = append(validIndices, len(s))
+	
+	low := 0
+	high := len(validIndices) - 1
+	bestIdx := 0
+	
+	for low <= high {
+		mid := (low + high) / 2
+		byteIdx := validIndices[mid]
+		sub := s[:byteIdx]
+		width := lipgloss.Width(sub)
+		
+		if width <= w {
+			bestIdx = byteIdx
+			low = mid + 1
+		} else {
+			high = mid - 1
+		}
+	}
+	
+	// Append reset code if we truncated (heuristic)
+	// Or trust user not to end in weird state.
+	// Adding \x1b[0m is safe.
+	return s[:bestIdx] + "\x1b[0m"
+}
+
 // renderPane 渲染单个编辑器窗格
 func (m Model) renderPane(p *EditorPane, width, height int, isActive bool) string {
-	// 1. Sync Viewport Content
-	// 注意: 每次渲染都 SetContent 可能有性能损耗，但在 TUI 中通常可以接受
-	// 这样保证 Viewport 的滚动逻辑基于最新内容
-	rawContent := strings.Join(p.Lines, "\n")
-	p.Viewport.SetContent(rawContent)
-	p.Viewport.Width = width - 2 // reserved for border
-	p.Viewport.Height = height - 2
+	// Calculate inner dimensions
+	innerWidth := width - 2
+	innerHeight := height - 2
+	if innerWidth < 0 { innerWidth = 0 }
+	if innerHeight < 0 { innerHeight = 0 }
 	
-	// 2. 获取可视区域 (Bubble Tea Viewport 处理了滚动)
-	visibleContent := p.Viewport.View()
-	visibleLines := strings.Split(visibleContent, "\n")
-
+	// Update Viewport dimensions for scrolling calculations
+	p.Viewport.Width = innerWidth
+	p.Viewport.Height = innerHeight
+	
+	// Ensure YOffset keeps cursor in view
+	if p.CursorY < p.Viewport.YOffset {
+		p.Viewport.YOffset = p.CursorY
+	}
+	if p.CursorY >= p.Viewport.YOffset + innerHeight {
+		p.Viewport.YOffset = p.CursorY - innerHeight + 1
+	}
+	if p.Viewport.YOffset < 0 {
+		p.Viewport.YOffset = 0
+	}
+	
 	var lines []string
-
-	// 实际可用内容宽高 (减去边框)
-	contentWidth := width - 2
-	// contentHeight := height - 2 
 	
-	// 行号区域宽度
-	codeWidth := contentWidth - 7
+	// Code width (after line number)
+	codeWidth := innerWidth - 7
 	if codeWidth < 1 { codeWidth = 1 }
 
-	// 语法高亮 (简单处理: 每帧匹配，以后优化到 EditorPane.Lexer)
+	// Syntax highlighting setup
 	lexer := lexers.Match(p.Filename)
 	if lexer == nil { lexer = lexers.Fallback }
 	lexer = chroma.Coalesce(lexer)
@@ -2265,52 +2463,59 @@ func (m Model) renderPane(p *EditorPane, width, height int, isActive bool) strin
 	if style == nil { style = styles.Fallback }
 	formatter := formatters.TTY256
 
-	// Render loop
-	// P.Viewport.View() returns ONLY the visible lines.
-	// We need to calculate the starting line number based on YOffset.
+	// Render visible lines directly from p.Lines
 	startLine := p.Viewport.YOffset
-	
-	for i, lineContent := range visibleLines {
-		// 避免超出高度 (Viewport 有时会多返回一行?)
-		if i >= height-2 { break }
+	endLine := startLine + innerHeight
+	if endLine > len(p.Lines) {
+		endLine = len(p.Lines)
+	}
 
-		realLineNum := startLine + i + 1
-		lineNumStr := fmt.Sprintf("%d", realLineNum)
-		// Style line number
-		lineNumStyled := lineNumberStyle.Render(lineNumStr)
+	for lineIdx := startLine; lineIdx < endLine; lineIdx++ {
+		rawLine := p.Lines[lineIdx]
 		
-		// Highlight line content
-		// 对单行高亮有个问题: 上下文丢失。但为了 MVP...
-		// 更好的做法是全高亮然后 Viewport 截取。
-		// 但 Viewport 目前只存纯文本? 
-		// SetContent 可以存 ANSI 字符串。
-		// 如果 SetContent 存了高亮后的 ANSI 字符串，Viewport.View() 就会返回带颜色的。
-		// 让我们尝试在 SetContent 之前高亮整个文件? 
-		// 对于大文件太慢。
-		// MVP: 单行高亮。
-		
-		it, err := lexer.Tokenise(nil, lineContent)
-		var highlighted bytes.Buffer
-		if err == nil {
-			formatter.Format(&highlighted, style, it)
-			lineContent = highlighted.String()
+		// Line number styling (right-aligned, 4 chars wide)
+		lineNumStr := fmt.Sprintf("%4d", lineIdx+1)
+		lineNumStyleToUse := lineNumberStyle
+		if isActive && lineIdx == p.CursorY {
+			lineNumStyleToUse = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
 		}
-
-		// 移除换行
-		lineContent = strings.ReplaceAll(lineContent, "\n", "")
+		lineNumStyled := lineNumStyleToUse.Render(lineNumStr)
 		
-		// 截断
-		// lineStyle := lipgloss.NewStyle().Width(codeWidth).MaxWidth(codeWidth)
-		// renderedContent := lineStyle.Render(lineContent)
-		// ANSI 字符处理比较麻烦，这里暂时不做硬截断，依赖 Viewport 的宽? 
-		// Viewport 会处理换行吗? 
-		// 如果 Viewport 只是 Text，它不做 wrapping (除非 SetStyle)。
+		var lineContent string
+		
+		// Cursor line: render with cursor, no syntax highlight
+		if isActive && lineIdx == p.CursorY {
+			runes := []rune(rawLine)
+			cx := p.CursorX
+			if cx > len(runes) { cx = len(runes) }
+			
+			if cx == len(runes) {
+				// Cursor at EOL
+				lineContent = string(runes) + "\x1b[7m \x1b[0m"
+			} else {
+				before := string(runes[:cx])
+				char := string(runes[cx])
+				after := string(runes[cx+1:])
+				cursorChar := "\x1b[7m" + char + "\x1b[0m"
+				lineContent = before + cursorChar + after
+			}
+		} else {
+			// Non-cursor line: apply syntax highlighting
+			it, err := lexer.Tokenise(nil, rawLine)
+			var highlighted bytes.Buffer
+			if err == nil {
+				formatter.Format(&highlighted, style, it)
+				lineContent = strings.ReplaceAll(highlighted.String(), "\n", "")
+			} else {
+				lineContent = rawLine
+			}
+		}
 		
 		lines = append(lines, fmt.Sprintf("%s │ %s", lineNumStyled, lineContent))
 	}
 	
-	// Fill empty space
-	for len(lines) < height-2 {
+	// Fill empty space if fewer lines than innerHeight
+	for len(lines) < innerHeight {
 		lineNum := lineNumberStyle.Render("~")
 		lines = append(lines, fmt.Sprintf("%s │", lineNum))
 	}
@@ -2321,13 +2526,18 @@ func (m Model) renderPane(p *EditorPane, width, height int, isActive bool) strin
 	return renderWindow(strings.Join(lines, "\n"), title, isActive, width, height, false)
 }
 
+
 // renderSidebar 渲染文件树侧边栏
 func (m Model) renderSidebar(width, height int) string {
 	var lines []string
 
-	// 内容高度
+	// 内容高度 (reserve 2 for border, 2 for input/confirm if active)
 	contentHeight := height - 2
-	visibleHeight := contentHeight
+	inputAreaHeight := 0
+	if m.fileTree.State == TreeInput || m.fileTree.State == TreeConfirmDelete {
+		inputAreaHeight = 2
+	}
+	visibleHeight := contentHeight - inputAreaHeight
 	if visibleHeight < 0 { visibleHeight = 0 }
 
 	for i, entry := range m.fileTree.Entries {
@@ -2374,6 +2584,25 @@ func (m Model) renderSidebar(width, height int) string {
 	remaining := visibleHeight - usedLines
 	for i := 0; i < remaining; i++ {
 		lines = append(lines, "")
+	}
+	
+	// Render input box or confirmation at bottom
+	if m.fileTree.State == TreeInput {
+		// Input box
+		inputStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("39")).
+			Width(width - 4)
+		inputView := inputStyle.Render(m.fileTree.Input.View())
+		lines = append(lines, inputView)
+	} else if m.fileTree.State == TreeConfirmDelete {
+		// Delete confirmation (red)
+		confirmStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196")).
+			Bold(true)
+		fileName := filepath.Base(m.fileTree.Selected)
+		confirmText := confirmStyle.Render(fmt.Sprintf("⚠️ Delete %s? (y/n)", fileName))
+		lines = append(lines, confirmText)
 	}
 
 	title := fmt.Sprintf("Files:%s", filepath.Base(m.fileTree.rootPath))
