@@ -1676,6 +1676,8 @@ func runGitPushStream(sub chan string) tea.Cmd {
 		// git push -u origin HEAD 将当前分支推送到 origin 上的同名分支并建立关联
 		// 这解决了 "fatal: The current branch master has no upstream branch" 问题
 		cmd := exec.Command("git", "push", "-u", "origin", "HEAD")
+		// 关键修复: 禁用交互式提示，防止因需要认证而导致界面卡死
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 		
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
