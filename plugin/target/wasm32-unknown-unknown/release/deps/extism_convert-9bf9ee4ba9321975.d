@@ -1,0 +1,11 @@
+/mnt/c/Users/joyins/Desktop/FuckVim/plugin/target/wasm32-unknown-unknown/release/deps/libextism_convert-9bf9ee4ba9321975.rmeta: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/encoding.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/from_bytes.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/memory_handle.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/to_bytes.rs
+
+/mnt/c/Users/joyins/Desktop/FuckVim/plugin/target/wasm32-unknown-unknown/release/deps/libextism_convert-9bf9ee4ba9321975.rlib: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/encoding.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/from_bytes.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/memory_handle.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/to_bytes.rs
+
+/mnt/c/Users/joyins/Desktop/FuckVim/plugin/target/wasm32-unknown-unknown/release/deps/extism_convert-9bf9ee4ba9321975.d: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/encoding.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/from_bytes.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/memory_handle.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/to_bytes.rs
+
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/lib.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/encoding.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/from_bytes.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/memory_handle.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/extism-convert-1.13.0/src/to_bytes.rs:

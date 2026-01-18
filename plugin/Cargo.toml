@@ -1,0 +1,18 @@
+[package]
+name = "plugin"
+version = "0.0.1"
+edition = "2021"
+description = "FuckVim WASM plugin - AI processing simulation"
+
+# 编译为动态库，这是WASM插件所需的crate类型
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Extism Plugin Development Kit - 用于创建可被Go Host调用的WASM函数
+extism-pdk = "1.2.1"
+
+# 优化WASM体积：release模式下启用LTO和最小化优化
+[profile.release]
+lto = true
+opt-level = "s"
