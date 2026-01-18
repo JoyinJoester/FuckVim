@@ -12,6 +12,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"bufio"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -279,6 +281,11 @@ type Model struct {
 	cachedLexer     chroma.Lexer
 	cachedStyle     *chroma.Style
 	cachedFormatter chroma.Formatter
+
+	// ----------------------------------------------------
+	// 异步任务通道
+	// ----------------------------------------------------
+	pushChan chan string // Git Push 实时输出通道
 }
 
 // =============================================================================
@@ -634,14 +641,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	
-	case pushMsg:
-		// 处理 git push 异步结果
-		if msg.err != nil {
-			m.statusMsg = "❌ Push 失败: " + msg.err.Error()
-		} else {
-			m.statusMsg = "✅ Push 成功!"
+	case pushProgressMsg:
+		// 实时更新 Git Push 进度
+		line := string(msg)
+		if strings.TrimSpace(line) != "" {
+			m.statusMsg = "GIT: " + line
 		}
-		m.syncGitStatus() // 刷新 Git 状态
+		// 继续监听下一行
+		return m, waitForPushOutput(m.pushChan)
+		
+	case pushDoneMsg:
+		// Push 完成
+		if msg.err != nil {
+			errStr := msg.err.Error()
+			if len(errStr) > 50 { errStr = errStr[:47] + "..." }
+			m.statusMsg = "❌ Push 失败: " + errStr
+		} else {
+			m.statusMsg = "✅ Push Complete"
+		}
+		m.pushChan = nil // 清理通道
+		m.syncGitStatus()
 		return m, nil
 	}
 
@@ -923,13 +942,18 @@ func (m Model) handleGitMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = NormalMode
 		m.statusMsg = "📝 编辑 Git 配置 (按 :w 保存)"
 
-	case "P": // Shift+P: 异步推送到远程
+	case "P": // Shift+P: 异步推送到远程 (流式反馈)
 		if !m.git.IsRepo {
 			m.statusMsg = "⚠ 不是 Git 仓库"
 			return m, nil
 		}
-		m.statusMsg = "⏳ 正在推送到远程..."
-		return m, pushCmd // 返回后台命令
+		m.statusMsg = "🚀 Initiating Push..."
+		m.pushChan = make(chan string)
+		// 启动后台推送任务 + 启动监听器
+		return m, tea.Batch(
+			runGitPushStream(m.pushChan),
+			waitForPushOutput(m.pushChan),
+		)
 
 	case "enter":
 		m.statusMsg = "Diff 功能暂未实现"
@@ -1468,20 +1492,86 @@ func (m *Model) callPlugin() {
 // tickMsg 用于去抖动计时器
 type tickMsg time.Time
 
-// pushMsg 用于异步 git push 结果
-type pushMsg struct {
-	err error
+// pushProgressMsg 包含一行 Git 输出
+type pushProgressMsg string
+
+// pushDoneMsg 表示推送完成
+type pushDoneMsg struct{ err error }
+
+// waitForPushOutput 监听推送输出通道
+func waitForPushOutput(sub chan string) tea.Cmd {
+	return func() tea.Msg {
+		data, ok := <-sub
+		if !ok {
+			return nil // 通道关闭，停止监听
+		}
+		return pushProgressMsg(data)
+	}
 }
 
-// pushCmd 返回一个后台执行 git push 的命令
-func pushCmd() tea.Msg {
-	cmd := exec.Command("git", "push")
-	// 获取组合输出以便显示错误信息
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return pushMsg{err: fmt.Errorf("%s", strings.TrimSpace(string(output)))}
+// runGitPushStream 在后台运行 git push 并流式传输输出
+func runGitPushStream(sub chan string) tea.Cmd {
+	return func() tea.Msg {
+		// 智能推送策略: 总是尝试设置上游分支
+		// git push -u origin HEAD 将当前分支推送到 origin 上的同名分支并建立关联
+		// 这解决了 "fatal: The current branch master has no upstream branch" 问题
+		cmd := exec.Command("git", "push", "-u", "origin", "HEAD")
+		
+		stdout, _ := cmd.StdoutPipe()
+		stderr, _ := cmd.StderrPipe()
+		
+		if err := cmd.Start(); err != nil {
+			sub <- "Error starting cmd: " + err.Error()
+			close(sub)
+			return pushDoneMsg{err: err}
+		}
+
+		// 在 Goroutine 中读取输出
+		go func() {
+			defer close(sub)
+			
+			// 组合 stdout 和 stderr
+			scanner := bufio.NewScanner(io.MultiReader(stdout, stderr))
+			for scanner.Scan() {
+				text := scanner.Text()
+				// 发送每行输出到通道
+				sub <- text
+			}
+			
+			// 等待命令完成
+			cmd.Wait()
+		}()
+		
+		// 注意: 这个 Cmd 本身只负责启动 Goroutine，
+		// 真正的完成信号由 Update 中的通道关闭或额外逻辑处理?
+		// Bubble Tea 的模型里，Cmd 通常返回 Msg。
+		// 这里我们用 Goroutine 发消息到 channel，Update 监听 channel。
+		// 但怎么知道结束了呢？
+		// 当 channel 关闭时，waitForPushOutput 返回 nil。
+		// 但我们需要发送最后的 pushDoneMsg。
+		
+		// 改进策略: 让 runGitPushStream 阻塞等待 cmd 完成并返回 pushDoneMsg？
+		// 不行，那样会阻塞 UI (如果没放进 goroutine)。
+		// 其实 Cmd 函数本身是在后台运行的吗？不，Cmd 函数是同步调用的，返回 Msg。
+		// Bubble Tea 运行时会在 goroutine 中执行 Cmd。
+		
+		// 正确做法:
+		// runGitPushStream 应该是一个 Cmd，它执行整个 push 过程 (阻塞)，
+		// 在过程中往 channel 发送数据。
+		// 最后返回 pushDoneMsg。
+		
+		// 重新实现 runGitPushStream (阻塞式):
+		
+		combinedOutput := io.MultiReader(stdout, stderr)
+		scanner := bufio.NewScanner(combinedOutput)
+		for scanner.Scan() {
+			sub <- scanner.Text()
+		}
+		
+		err := cmd.Wait()
+		close(sub) // 关闭通道通知监听器停止
+		return pushDoneMsg{err: err}
 	}
-	return pushMsg{err: nil}
 }
 
 // startPredictionDebounce 返回一个 Tick 命令，用于触发预测
