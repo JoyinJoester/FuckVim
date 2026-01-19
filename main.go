@@ -1741,11 +1741,18 @@ func (m Model) handleGitMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, checkGitStatusCmd()
 		}
 	case "c":
-		// 手动提交: 先用空格键 stage 单个文件，然后 c 提交
-		m.mode = CommandMode
-		m.commandBuffer = "commit "
-		m.statusMsg = "请输入提交信息: :commit <msg>"
-		m.focus = FocusCommand
+		// 手动提交 (不自动 stage，需要先用空格键 stage)
+		if !m.git.IsRepo {
+			m.statusMsg = "⚠ 不是 Git 仓库"
+			return m, nil
+		}
+		m.mode = ModeGitCommit
+		m.commandInput.Placeholder = "Commit message..."
+		m.commandInput.Prompt = "Commit: "
+		m.commandInput.Reset()
+		m.commandInput.Focus()
+		m.statusMsg = "📝 请输入提交信息 (仅提交已暂存的文件)"
+		return m, textinput.Blink
 	
 
 	
@@ -3919,13 +3926,13 @@ func (m Model) renderGit(width, height int) string {
 			output += "  ✅ Up to date"
 		} else {
 			if m.git.Ahead > 0 {
-				output += fmt.Sprintf("  %s: %d %s\n", m.tr("git.ahead"), m.git.Ahead, m.tr("git.ahead_sub"))
+				output += fmt.Sprintf("  🚀 准备推送: %d 个提交待上传\n", m.git.Ahead)
 			}
 			if m.git.Behind > 0 {
-				output += fmt.Sprintf("  %s: %d\n", m.tr("git.behind"), m.git.Behind)
+				output += fmt.Sprintf("  📥 需拉取: %d 个提交\n", m.git.Behind)
 			}
-			output += fmt.Sprintf("\n  %s", m.tr("git.push_hint"))
-			output += fmt.Sprintf("\n  %s", m.tr("git.pull_hint"))
+			output += "\n  [ Shift+P ] 推送到远程"
+			output += "\n  [ :pull ] 拉取更新"
 		}
 		
 		return renderWindow(output, m.tr("wk.git"), m.focus == FocusGit, width, height, false)
