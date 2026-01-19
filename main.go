@@ -4124,7 +4124,25 @@ func (m Model) renderStatusBar() string {
     availableWidth := m.width - w(leftBlock) - w(rightBlock)
     if availableWidth < 0 { availableWidth = 0 }
     
-    spacer := lipgloss.NewStyle().Width(availableWidth).Render("")
+    // 如果有状态消息，在中间显示
+    var spacer string
+    if m.statusMsg != "" {
+        statusStyle := lipgloss.NewStyle().
+            Foreground(lipgloss.Color("220")). // 黄色
+            Bold(true)
+        statusText := " " + m.statusMsg + " "
+        statusWidth := w(statusText)
+        if statusWidth < availableWidth {
+            leftPad := (availableWidth - statusWidth) / 2
+            rightPad := availableWidth - statusWidth - leftPad
+            spacer = strings.Repeat(" ", leftPad) + statusStyle.Render(statusText) + strings.Repeat(" ", rightPad)
+        } else {
+            // 状态消息太长，截断
+            spacer = statusStyle.Render(truncateToWidth(statusText, availableWidth))
+        }
+    } else {
+        spacer = lipgloss.NewStyle().Width(availableWidth).Render("")
+    }
     
     // 5. Final Join
     return lipgloss.JoinHorizontal(lipgloss.Top, leftBlock, spacer, rightBlock)
