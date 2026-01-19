@@ -16,9 +16,11 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -42,12 +44,130 @@ import (
 // =============================================================================
 
 const (
+	// Layout Constants
+	HeaderHeight    = 1  // Top Tab Grid
+	StatusBarHeight = 1  // Bottom Status Bar
+	WhichKeyHeight  = 12 // Bottom Menu (Fixed Height)
+
+	// I18n Language Constants
+	LangEN = "en"
+	LangZH = "zh"
+
 	// WASM插件路径 - 相对于执行目录
+	PluginDir  = "./plugins"
 	pluginPath = "plugin.wasm"
 
 	// 预测去抖动时间 - 用户停止输入多久后触发AI预测
 	predictionDebounce = 500 * time.Millisecond
 )
+
+// translations 多语言翻译字典
+var translations = map[string]map[string]string{
+	LangEN: {
+		// Status Bar Modes
+		"status.normal":  "NORMAL",
+		"status.insert":  "INSERT",
+		"status.command": "COMMAND",
+		"status.visual":  "VISUAL",
+		"status.tree":    "TREE",
+		"status.finder":  "FINDER",
+		"status.whichkey": "MENU",
+
+		// WhichKey Menu Items
+		"wk.find":      "Find Files",
+		"wk.explorer":  "File Explorer",
+		"wk.git":       "Git Dashboard",
+		"wk.save":      "Save File",
+		"wk.quit":      "Quit",
+		"wk.split_v":   "Split Vertical",
+		"wk.split_h":   "Split Horizontal",
+		"wk.toggle_nu": "Toggle LineNum",
+		"wk.paste":     "Paste",
+		"wk.terminal":  "Terminal",
+		"wk.lang":      "Switch Language",
+		"wk.help":      "Help / Keys",
+
+		// Git Dashboard
+		"git.clean":     "✨ All Clean",
+		"git.clean_sub": "Working tree clean.",
+		"git.ahead":     "🚀 Ready to Push",
+		"git.ahead_sub": "commits to push.",
+		"git.behind":    "📥 Need to Pull",
+		"git.push_hint": "[ Shift+P ] Push to origin",
+		"git.pull_hint": "[ :pull ] Update local",
+		"git.staging":   "⏳ Staging changes...",
+		"git.pushing":   "⏳ Pushing...",
+		"git.success":   "✅ Push Success!",
+		"git.failed":    "❌ Push Failed",
+
+		// Fuzzy Finder
+		"find.title":       "🔍 Fuzzy Find Files",
+		"find.placeholder": "Search files...",
+		"find.scanning":    "Scanning files...",
+		"find.found":       "Found %d files",
+
+		// File Tree
+		"tree.delete_confirm": "Delete %s? (y/n)",
+
+		// General Messages
+		"msg.saved":        "💾 Saved: %s",
+		"msg.clipboard_empty": "ℹ Clipboard empty",
+		"msg.pasted":       "📋 Pasted",
+		"msg.lang_set":     "Language set to %s",
+	},
+	LangZH: {
+		// Status Bar Modes
+		"status.normal":  "普通",
+		"status.insert":  "编辑",
+		"status.command": "命令",
+		"status.visual":  "可视",
+		"status.tree":    "文件",
+		"status.finder":  "搜索",
+		"status.whichkey": "菜单",
+
+		// WhichKey Menu Items
+		"wk.find":      "查找文件",
+		"wk.explorer":  "文件浏览",
+		"wk.git":       "Git 面板",
+		"wk.save":      "保存文件",
+		"wk.quit":      "退出程序",
+		"wk.split_v":   "左右分屏",
+		"wk.split_h":   "上下分屏",
+		"wk.toggle_nu": "切换行号",
+		"wk.paste":     "粘贴",
+		"wk.terminal":  "终端",
+		"wk.lang":      "切换语言",
+		"wk.help":      "帮助 / 快捷键",
+
+		// Git Dashboard
+		"git.clean":     "✨ 代码库整洁",
+		"git.clean_sub": "无需提交，工作区干净。",
+		"git.ahead":     "🚀 准备推送",
+		"git.ahead_sub": "个提交待上传。",
+		"git.behind":    "📥 需要拉取",
+		"git.push_hint": "[ Shift+P ] 推送到远程",
+		"git.pull_hint": "[ :pull ] 拉取更新",
+		"git.staging":   "⏳ 正在暂存...",
+		"git.pushing":   "⏳ 正在推送...",
+		"git.success":   "✅ 推送成功！",
+		"git.failed":    "❌ 推送失败",
+
+		// Fuzzy Finder
+		"find.title":       "🔍 模糊搜索文件",
+		"find.placeholder": "输入文件名搜索...",
+		"find.scanning":    "正在扫描文件...",
+		"find.found":       "找到 %d 个文件",
+
+		// File Tree
+		"tree.delete_confirm": "确认删除 %s 吗? (y/n)",
+
+		// General Messages
+		"msg.saved":        "💾 已保存: %s",
+		"msg.clipboard_empty": "ℹ 剪贴板为空",
+		"msg.pasted":       "📋 已粘贴",
+		"msg.lang_set":     "语言已切换为 %s",
+	},
+}
 
 // Mode 表示编辑器模式
 type Mode int
@@ -58,10 +178,13 @@ const (
 	CommandMode               // 命令模式 - 输入 Ex 命令 (:q, :w, etc.)
 	FileTreeMode              // 文件树模式 - 浏览文件系统
 	FuzzyFindMode             // 模糊搜索模式 - Telescope-style finder
+	WhichKeyMode              // WhichKey 菜单模式 - 显示可用快捷键
+	HelpMode                  // ? 帮助文档模式
 )
 
 func (m Mode) String() string {
 	switch m {
+
 	case NormalMode:
 		return "NORMAL"
 	case InsertMode:
@@ -72,6 +195,8 @@ func (m Mode) String() string {
 		return "TREE"
 	case FuzzyFindMode:
 		return "FINDER"
+	case WhichKeyMode:
+		return "WHICH-KEY"
 	default:
 		return "UNKNOWN"
 	}
@@ -113,6 +238,32 @@ type FileEntry struct {
 	name  string
 	path  string
 	isDir bool
+}
+
+// -----------------------------------------------------------------------------
+// WhichKey Menu (LazyVim-style Leader Key Menu)
+// -----------------------------------------------------------------------------
+
+// KeyMenuItem represents a single item in the WhichKey menu
+type KeyMenuItem struct {
+	Key  string
+	Desc string
+}
+
+// rootKeys defines the available shortcuts in WhichKey menu
+var rootKeys = []KeyMenuItem{
+	{Key: "f", Desc: "wk.find"},
+	{Key: "e", Desc: "wk.explorer"},
+	{Key: "g", Desc: "wk.git"},
+	{Key: "w", Desc: "wk.save"},
+	{Key: "q", Desc: "wk.quit"},
+	{Key: "v", Desc: "wk.split_v"},
+	{Key: "s", Desc: "wk.split_h"},
+	{Key: "t", Desc: "wk.terminal"},
+	{Key: "T", Desc: "wk.toggle_nu"},
+	{Key: "p", Desc: "wk.paste"},
+	{Key: "l", Desc: "wk.lang"},
+	{Key: "?", Desc: "wk.help"},
 }
 
 // Focus 表示当前焦点位置
@@ -276,18 +427,28 @@ const (
 	HorizontalSplit
 )
 
+// Tab 代表一个工作区 (Workspace)
+type Tab struct {
+	Name       string        // Tab 显示名称 (通常是当前文件)
+	Panes      []*EditorPane // 该 Tab 内的分屏列表
+	ActivePane int           // 该 Tab 内的活动分屏索引
+	SplitType  SplitType     // 该 Tab 的分屏布局类型
+}
+
 // Model 是 Bubble Tea 的核心状态结构
 type Model struct {
-	// 多窗口系统
-	panes      []*EditorPane
-	activePane int
-	splitType  SplitType
+	// 多标签页系统 (Vim-style Tabs)
+	tabs      []*Tab
+	activeTab int
 
 	// 编辑器模式
 	mode Mode
 
 	// 命令缓冲区 (用于 :command 模式)
+	// 命令缓冲区 (Legacy, now using commandInput)
 	commandBuffer string
+	// Command Input Bar
+	commandInput textinput.Model
 
 	// 状态/消息显示
 	statusMsg string
@@ -296,6 +457,9 @@ type Model struct {
 	suggestion       string // 当前显示的建议文本
 	suggestionPending bool   // 是否正在等待预测（去抖动中）
 	lastInputTime    time.Time // 最后一次输入的时间
+
+	// I18n 语言设置
+	language string
 
 	// WASM 插件实例
 	plugin *extism.Plugin
@@ -347,6 +511,12 @@ type Model struct {
 	finderRoot   string          // Root directory for finder
 
 	// ----------------------------------------------------
+	// Help Viewport
+	// ----------------------------------------------------
+	helpViewport viewport.Model
+
+
+	// ----------------------------------------------------
 	// Editor Preferences
 	// ----------------------------------------------------
 	relativeLineNumbers bool // true = Hybrid Vim-style, false = Absolute standard
@@ -380,12 +550,43 @@ func initialModel() Model {
 	ti.CharLimit = 156
 	ti.Width = 20
 
+	// Initialize Command Input
+	ci := textinput.New()
+	ci.Prompt = ":"
+	ci.Placeholder = ""
+	ci.CharLimit = 200
+	ci.Width = 50
+
+	// Initialize Help Viewport
+	vp := viewport.New(0, 0)
+	vp.Style = lipgloss.NewStyle().Padding(0, 1)
+
+	// Language Auto-Detection
+	lang := LangEN
+	envLang := os.Getenv("LANG")
+	if strings.Contains(strings.ToLower(envLang), "zh") || strings.Contains(strings.ToLower(envLang), "cn") {
+		lang = LangZH
+	}
+
+	// Initial Tab
+	initialTab := &Tab{
+		Name:       "[No Name]",
+		Panes:      []*EditorPane{initialPane},
+		ActivePane: 0,
+		SplitType:  NoSplit,
+	}
+	if initialPane.Filename != "" {
+		initialTab.Name = filepath.Base(initialPane.Filename)
+	}
+
 	m := Model{
-		panes:      []*EditorPane{initialPane},
-		activePane: 0,
-		splitType:  NoSplit,
+		language:   lang,
+		tabs:       []*Tab{initialTab},
+		activeTab:  0,
 		
 		mode:      NormalMode,
+		commandInput: ci,
+		helpViewport: vp,
 		statusMsg: "欢迎使用 FuckVim! 按 'i' 插入, :vsp 分屏, :q 退出",
 		width:     80,
 		height:    24,
@@ -404,7 +605,88 @@ func initialModel() Model {
 	return m
 }
 
+// generateHelpContent Generates the multi-language help text
+func (m Model) generateHelpContent() string {
+	title := " 🔥 FUCKVIM CHEAT SHEET "
+	if m.language == "zh" { title = " 🔥 FUCKVIM 快捷键大全 " }
+	
+	var s strings.Builder
+	
+	s.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Render(title) + "\n\n")
+	
+	// Define sections
+	sections := []struct{ TitleEN, TitleZH, ContentEN, ContentZH string }{
+		{
+			"Global / Navigation", "全局 / 导航",
+			"  Space       : Open WhichKey Menu\n  Ctrl+p      : Fuzzy Find Files\n  Shift+h/l   : Switch Tabs\n  Ctrl+h/j/k/l: Move focus between Panes",
+			"  Space       : 打开快捷键菜单\n  Ctrl+p      : 模糊搜索文件\n  Shift+h/l   : 切换标签页\n  Ctrl+h/j/k/l: 在分屏间切换焦点",
+		},
+		{
+			"Normal Mode", "普通模式",
+			"  h/j/k/l     : Move Cursor\n  i           : Insert Mode\n  :           : Command Mode\n  /           : Search in File",
+			"  h/j/k/l     : 移动光标\n  i           : 进入编辑模式\n  :           : 进入命令模式\n  /           : 文件内搜索",
+		},
+		{
+			"File Tree (Sidebar)", "文件树 (侧边栏)",
+			"  j/k         : Navigate\n  Enter       : Open File / Toggle Dir\n  a           : Create File\n  d           : Delete File\n  r           : Rename File",
+			"  j/k         : 上下移动\n  Enter       : 打开文件 / 折叠目录\n  a           : 新建文件\n  d           : 删除文件\n  r           : 重命名",
+		},
+		{
+			"Commands", "常用命令",
+			"  :w          : Save\n  :q          : Quit\n  :vsp [file] : Vertical Split\n  :sp [file]  : Horizontal Split\n  :lang [en/zh]: Switch Language",
+			"  :w          : 保存\n  :q          : 退出\n  :vsp [文件] : 左右分屏\n  :sp [文件]  : 上下分屏\n  :lang [en/zh]: 切换语言",
+		},
+	}
+
+	styleHeader := lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true) // Blue
+
+	for _, sec := range sections {
+		t := sec.TitleEN
+		c := sec.ContentEN
+		if m.language == "zh" {
+			t = sec.TitleZH
+			c = sec.ContentZH
+		}
+		s.WriteString(styleHeader.Render("# "+t) + "\n")
+		s.WriteString(c + "\n\n")
+	}
+	
+	return s.String()
+}
+
+func openTerminalCmd() tea.Cmd {
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "bash"
+		if runtime.GOOS == "windows" {
+			shell = "powershell.exe"
+		}
+	}
+	c := exec.Command(shell)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return terminalFinishedMsg{err}
+	})
+}
+
 // createPaneFromFile 创建新窗格 (如果文件不存在则为空缓冲)
+// sanitizeContent cleanses file content to prevent layout issues
+// 1. Validates UTF-8
+// 2. Expands Tabs to 4 Spaces (Critical for TUI layout)
+func sanitizeContent(data []byte) string {
+	// 1. Ensure Valid UTF-8
+	if !utf8.Valid(data) {
+		// Go handles invalid UTF-8 by inserting replacement chars when casting to string
+		// So we just proceed. Explicit handling could go here.
+	}
+	content := string(data)
+
+	// 2. GLOBAL TAB EXPANSION
+	// Replace Tab with 4 spaces to prevent layout explosion
+	content = strings.ReplaceAll(content, "\t", "    ")
+
+	return content
+}
+
 func (m Model) createPaneFromFile(path string) (*EditorPane, error) {
 	var content string
 	var lines []string
@@ -420,7 +702,8 @@ func (m Model) createPaneFromFile(path string) (*EditorPane, error) {
 			return nil, err
 		}
 	} else {
-		content = string(bytes)
+		// 2. Sanitize (The Shield)
+		content = sanitizeContent(bytes)
 		lines = strings.Split(content, "\n")
 	}
 
@@ -438,7 +721,8 @@ func (m Model) createPaneFromFile(path string) (*EditorPane, error) {
 
 // cloneActivePane 克隆当前活动窗格
 func (m Model) cloneActivePane() *EditorPane {
-	curr := m.panes[m.activePane]
+	curTab := m.tabs[m.activeTab]
+	curr := curTab.Panes[curTab.ActivePane]
 	
 	newVp := viewport.New(curr.Viewport.Width, curr.Viewport.Height)
 	newVp.SetContent(curr.Viewport.View()) // Copy displayed content
@@ -456,15 +740,97 @@ func (m Model) cloneActivePane() *EditorPane {
 	}
 }
 
+// createNewTab 创建新标签页并打开文件
+func (m *Model) createNewTab(path string) {
+	// Create Pane
+	newPane, err := m.createPaneFromFile(path)
+	if err != nil {
+		newPane = m.createEmptyPane() // Fallback to empty
+		m.statusMsg = fmt.Sprintf("Error opening file: %v", err)
+	}
+
+	// Create Tab
+	name := filepath.Base(path)
+	if path == "" { name = "[No Name]" }
+	
+	newTab := &Tab{
+		Name:       name,
+		Panes:      []*EditorPane{newPane},
+		ActivePane: 0,
+		SplitType:  NoSplit,
+	}
+
+	// Append and Focus
+	m.tabs = append(m.tabs, newTab)
+	m.activeTab = len(m.tabs) - 1
+	m.syncSizes()
+}
+
+// closeActiveTab 关闭当前标签页
+func (m *Model) closeActiveTab() {
+	if len(m.tabs) <= 1 {
+		// Only one tab left? Maybe quit? Or just empty it?
+		// For now, let's keep one empty tab
+		return 
+	}
+	
+	// Remove current tab
+	m.tabs = append(m.tabs[:m.activeTab], m.tabs[m.activeTab+1:]...)
+	
+	// Adjust index
+	if m.activeTab >= len(m.tabs) {
+		m.activeTab = len(m.tabs) - 1
+	}
+	if m.activeTab < 0 {
+		m.activeTab = 0
+	}
+	m.syncSizes()
+}
+
+// tr (Translate) 辅助函数：获取当前语言的翻译
+func (m Model) tr(key string) string {
+	// 1. Try current language
+	if dict, ok := translations[m.language]; ok {
+		if val, ok := dict[key]; ok {
+			return val
+		}
+	}
+	
+	// 2. Fallback to English
+	if dict, ok := translations[LangEN]; ok {
+		if val, ok := dict[key]; ok {
+			return val
+		}
+	}
+	
+	// 3. Fallback to key itself
+	return key
+}
+
+// createEmptyPane 创建一个空白窗格
+func (m Model) createEmptyPane() *EditorPane {
+	vp := viewport.New(0, 0)
+	return &EditorPane{
+		Viewport: vp,
+		Lines:    []string{""},
+		Filename: "[New]",
+		CursorX:  0,
+		CursorY:  0,
+	}
+}
+
 // -----------------------------------------------------------------------------
 // 异步加载命令 (Async Loader Commands)
 // -----------------------------------------------------------------------------
 
 // 消息定义
 type fileLoadedMsg struct {
-	content []string
-	err     error
+	filename string
+	content  []string
+	err      error
 }
+
+type terminalFinishedMsg struct{ err error }
 
 type directoryLoadedMsg struct {
 	entries []FileEntry
@@ -547,7 +913,7 @@ func loadFileCmd(filename string) tea.Cmd {
 		if len(lines) == 0 {
 			lines = []string{""}
 		}
-		return fileLoadedMsg{content: lines}
+		return fileLoadedMsg{filename: filename, content: lines}
 	}
 }
 
@@ -722,34 +1088,18 @@ func (m *Model) savePane(p *EditorPane) error {
 
 	content := strings.Join(p.Lines, "\n")
 
-	// Intelligent Saver: Makefile Tab Restoration
-	// Makefiles REQUIRE hard tabs for recipe lines
-	// Convert leading 4-space indentation back to tabs
-	baseName := filepath.Base(p.Filename)
-	if baseName == "Makefile" || baseName == "makefile" ||
-		baseName == "GNUmakefile" || strings.HasSuffix(baseName, ".mk") {
-		// Convert leading 4-spaces to tabs for each line
-		lines := strings.Split(content, "\n")
-		for i, line := range lines {
-			// Count leading 4-space groups and convert to tabs
-			originalLen := len(line)
-			trimmed := strings.TrimLeft(line, " ")
-			leadingSpaces := originalLen - len(trimmed)
-			tabCount := leadingSpaces / 4
-			remainingSpaces := leadingSpaces % 4
-
-			if tabCount > 0 {
-				lines[i] = strings.Repeat("\t", tabCount) + strings.Repeat(" ", remainingSpaces) + trimmed
-			}
-		}
-		content = strings.Join(lines, "\n")
+	// Intelligent Saver (Restore Tabs)
+	// Since we converted Tabs to Spaces on load, we should convert them back logic
+	if strings.HasSuffix(p.Filename, "go.mod") || 
+	   strings.HasSuffix(p.Filename, "Makefile") || 
+	   strings.HasSuffix(p.Filename, ".go") ||
+	   strings.HasSuffix(p.Filename, ".mk") {
+		// Basic naive conversion: 4 spaces -> Tab
+		// This fixes the "go.mod broken" issue and satisfies Makefiles
+		content = strings.ReplaceAll(content, "    ", "\t")
 	}
-
-	err := os.WriteFile(p.Filename, []byte(content), 0644)
-	if err != nil {
-		return err
-	}
-	return nil
+	
+	return os.WriteFile(p.Filename, []byte(content), 0644)
 }
 
 // stageGitFile 暂存文件
@@ -803,8 +1153,8 @@ func (m Model) Init() tea.Cmd {
 		loadPluginCmd(),
 	}
 	
-	if len(m.panes) > 0 && m.panes[0].Filename != "" {
-		cmds = append(cmds, loadFileCmd(m.panes[0].Filename))
+	if len(m.tabs) > 0 && len(m.tabs[0].Panes) > 0 && m.tabs[0].Panes[0].Filename != "" {
+		cmds = append(cmds, loadFileCmd(m.tabs[0].Panes[0].Filename))
 	}
 	
 	if resizeCmd != nil {
@@ -828,7 +1178,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.statusMsg = fmt.Sprintf("无法读取文件: %v", msg.err)
 		} else {
-			currPane := m.panes[m.activePane]
+			curTab := m.tabs[m.activeTab]
+			currPane := curTab.Panes[curTab.ActivePane]
 			currPane.Lines = msg.content
 			
 			// Update Viewport content as well (joined string)
@@ -837,7 +1188,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			currPane.Viewport.SetContent(content)
 			
 			// 初始化高亮
-			m.cachedLexer = lexers.Match(currPane.Filename)
+			m.cachedLexer = lexers.Match(msg.filename)
 			if m.cachedLexer == nil {
 				m.cachedLexer = lexers.Fallback
 			}
@@ -964,6 +1315,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.git.IsLoading = true
 		return m, checkGitStatusCmd()
 
+	case terminalFinishedMsg:
+		if msg.err != nil {
+			m.statusMsg = "Terminal Error: " + msg.err.Error()
+		} else {
+			m.statusMsg = "Terminal Session Closed"
+		}
+		// Force resize sync after returning from full screen terminal
+		m.syncSizes()
+		return m, tea.ClearScreen
+
 	case stageAllDoneMsg:
 		if msg.err != nil {
 			m.statusMsg = fmt.Sprintf("❌ Staging 失败: %v", msg.err)
@@ -1015,11 +1376,14 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
     switch m.focus {
     case FocusEditor:
+        // Get Active Tab
+        curTab := m.tabs[m.activeTab]
+
         if isCtrlH {
              // Left Navigation
              // 1. If Vertical Split and in Right Pane (1) -> Go to Left Pane (0)
-             if m.splitType == VerticalSplit && m.activePane == 1 {
-                 m.activePane = 0
+             if curTab.SplitType == VerticalSplit && curTab.ActivePane == 1 {
+                 curTab.ActivePane = 0
                  return m, nil
              }
 
@@ -1038,24 +1402,24 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
         if isCtrlL {
             // Right Navigation
             // If Vertical Split and in Left Pane (0) -> Go to Right Pane (1)
-            if m.splitType == VerticalSplit && len(m.panes) > 1 && m.activePane == 0 {
-                m.activePane = 1
+            if curTab.SplitType == VerticalSplit && len(curTab.Panes) > 1 && curTab.ActivePane == 0 {
+                curTab.ActivePane = 1
                 return m, nil
             }
         }
         if isCtrlJ {
             // Down Navigation
              // If Horizontal Split and in Top Pane (0) -> Go to Bottom Pane (1)
-             if m.splitType == HorizontalSplit && len(m.panes) > 1 && m.activePane == 0 {
-                 m.activePane = 1
+             if curTab.SplitType == HorizontalSplit && len(curTab.Panes) > 1 && curTab.ActivePane == 0 {
+                 curTab.ActivePane = 1
                  return m, nil
              }
         }
         if isCtrlK {
             // Up Navigation
              // If Horizontal Split and in Bot Pane (1) -> Go to Top Pane (0)
-             if m.splitType == HorizontalSplit && m.activePane == 1 {
-                 m.activePane = 0
+             if curTab.SplitType == HorizontalSplit && curTab.ActivePane == 1 {
+                 curTab.ActivePane = 0
                  return m, nil
              }
         }
@@ -1119,6 +1483,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
             return m.handleCommandMode(msg)
         case FuzzyFindMode:
             return m.handleFuzzyFindMode(msg)
+        case WhichKeyMode:
+            return m.handleWhichKeyMode(msg)
+        case HelpMode:
+            return m.handleHelpMode(msg)
         }
     }
 
@@ -1127,20 +1495,26 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleNormalMode 处理普通模式下的按键
 func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	currPane := m.panes[m.activePane]
+	curTab := m.tabs[m.activeTab]
+	currPane := curTab.Panes[curTab.ActivePane]
 
 	switch msg.String() {
+	case "ctrl+\\", "alt+t":
+		return m, openTerminalCmd()
+		
 	case "i":
 		// 进入插入模式
 		m.mode = InsertMode
 		m.statusMsg = "-- 插入模式 --"
 
 	case ":":
-		// 进入命令模式 (Vim 风格)
+		// Enter Command Mode
 		m.mode = CommandMode
-		m.commandBuffer = ""
-		m.statusMsg = ":"
-
+		m.commandBuffer = "" // Clear legacy buffer
+		m.commandInput.Focus()
+		m.commandInput.SetValue("")
+		m.statusMsg = ""
+		return m, nil
 	case "j", "down":
 		// 向下移动光标
 		if currPane.CursorY < len(currPane.Lines)-1 {
@@ -1180,6 +1554,20 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			currPane.CursorX--
 		}
 
+	case "H": // Shift+h (Prev Tab)
+		m.activeTab--
+		if m.activeTab < 0 {
+			m.activeTab = len(m.tabs) - 1
+		}
+		m.syncSizes()
+
+	case "L": // Shift+l (Next Tab)
+		m.activeTab++
+		if m.activeTab >= len(m.tabs) {
+			m.activeTab = 0
+		}
+		m.syncSizes()
+
 	case "l", "right":
 		// 向右移动光标
 		if currPane.CursorX < len(currPane.Lines[currPane.CursorY]) {
@@ -1210,6 +1598,12 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "✓ 已粘贴"
 		}
 
+	case " ":
+		// WhichKey 菜单 (Leader Key)
+		m.mode = WhichKeyMode
+		m.syncSizes() // Elastic Layout: shrink editor to make room for menu
+		m.statusMsg = "⌨ Press a key..."
+		return m, nil
 	case "ctrl+p":
 		// 模糊文件搜索 (Telescope-style finder)
 		m.mode = FuzzyFindMode
@@ -1217,7 +1611,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		// Initialize textinput for typing
 		ti := textinput.New()
-		ti.Placeholder = "Type to search..."
+		ti.Placeholder = m.tr("find.placeholder")
 		ti.Focus()
 		ti.CharLimit = 256
 		ti.Width = 50
@@ -1228,7 +1622,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.filteredFiles = nil
 		m.finderCursor = 0
 
-		m.statusMsg = "Scanning files..."
+		m.statusMsg = m.tr("find.scanning")
 		return m, findFilesCmd(m.finderRoot)
 	}
 
@@ -1334,7 +1728,8 @@ func (m Model) handleGitMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			currPane := m.panes[m.activePane]
+			curTab := m.tabs[m.activeTab]
+			currPane := curTab.Panes[curTab.ActivePane]
 			currPane.Lines = strings.Split(string(content), "\n")
 			currPane.Filename = file.Path
 			// Update Viewport
@@ -1361,16 +1756,19 @@ func (m Model) handleGitMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			text = strings.ReplaceAll(text, "\r\n", "\n")
 			text = strings.ReplaceAll(text, "\r\n", "\n")
-			currPane := m.panes[m.activePane]
+			curTab := m.tabs[m.activeTab]
+			currPane := curTab.Panes[curTab.ActivePane]
 			currPane.Lines = strings.Split(text, "\n")
 			currPane.Filename = file.Path + ".diff"
 			currPane.Viewport.SetContent(text)
 		}
 		
 		// 重置光标
-		m.panes[m.activePane].CursorX = 0
-		m.panes[m.activePane].CursorY = 0
-		m.panes[m.activePane].Viewport.SetYOffset(0)
+		curTab := m.tabs[m.activeTab]
+		currPane := curTab.Panes[curTab.ActivePane]
+		currPane.CursorX = 0
+		currPane.CursorY = 0
+		currPane.Viewport.SetYOffset(0)
 		
 		// 设置 Diff 语法高亮
 		m.cachedLexer = lexers.Get("diff")
@@ -1389,23 +1787,28 @@ func (m Model) handleGitMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleCommandMode 处理命令模式下的按键（类似 Vim 的 Ex 命令）
 func (m Model) handleCommandMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	
 	switch msg.Type {
 	case tea.KeyEsc:
 		// 取消命令，回到普通模式
 		m.mode = NormalMode
-		m.commandBuffer = ""
+		m.commandInput.Blur()
+		m.commandInput.SetValue("")
 		m.statusMsg = ""
+		return m, nil
 
 	case tea.KeyEnter:
 		// 执行命令
-		cmd := m.executeCommand()
+		rawCmd := m.commandInput.Value()
+		cmd := m.executeCommand(rawCmd)
 		
 		// 重置命令模式状态
 		m.mode = NormalMode
-		m.commandBuffer = ""
+		m.commandInput.Blur()
+		m.commandInput.SetValue("")
 		
-		// 恢复焦点到合适的窗口 (只在仍是 FocusCommand 时)
-		// 如果 executeCommand 已经设置了焦点，不要覆盖它
+		// 恢复焦点 (executeCommand might have changed focus, respect it)
 		if m.focus == FocusCommand {
 			if m.showGit {
 				m.focus = FocusGit
@@ -1419,27 +1822,12 @@ func (m Model) handleCommandMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if cmd != nil {
 			return m, cmd
 		}
-
-	case tea.KeyBackspace:
-		// 删除命令缓冲区中的字符
-		if len(m.commandBuffer) > 0 {
-			m.commandBuffer = m.commandBuffer[:len(m.commandBuffer)-1]
-			m.statusMsg = ":" + m.commandBuffer
-		} else {
-			// 缓冲区已空，回到普通模式
-			m.mode = NormalMode
-			m.statusMsg = ""
-		}
-
-	default:
-		// 添加字符到命令缓冲区 (支持中文等多字节字符)
-		if len(msg.Runes) > 0 {
-			m.commandBuffer += string(msg.Runes)
-			m.statusMsg = ":" + m.commandBuffer
-		}
+		return m, nil
 	}
-
-	return m, nil
+	
+	// Pass to textinput
+	m.commandInput, cmd = m.commandInput.Update(msg)
+	return m, cmd
 }
 
 // handleFuzzyFindMode 处理模糊搜索模式下的按键
@@ -1458,13 +1846,13 @@ func (m Model) handleFuzzyFindMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			item := m.filteredFiles[m.finderCursor]
 			fullPath := filepath.Join(m.finderRoot, item.path)
 
-			// Load file into active pane
-			m.panes[m.activePane].Filename = fullPath
+			// Load file into active pane (Old) -> New Tab (New)
+			m.createNewTab(fullPath)
 			m.mode = NormalMode
 			m.finderInput.Blur()
 			m.focus = FocusEditor
 			m.statusMsg = fmt.Sprintf("Opening: %s", item.path)
-			return m, loadFileCmd(fullPath)
+			return m, nil
 		}
 		m.mode = NormalMode
 		m.finderInput.Blur()
@@ -1511,18 +1899,223 @@ func (m Model) handleFuzzyFindMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// handleHelpMode 处理帮助页面交互
+func (m Model) handleHelpMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q", " ":
+		m.mode = NormalMode
+		m.syncSizes()
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.helpViewport, cmd = m.helpViewport.Update(msg)
+	return m, cmd
+}
+
+// handleWhichKeyMode 处理 WhichKey 菜单模式下的按键
+func (m Model) handleWhichKeyMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	curTab := m.tabs[m.activeTab]
+	currPane := curTab.Panes[curTab.ActivePane]
+
+	switch msg.String() {
+	case "esc", "space":
+		// Close menu
+		m.mode = NormalMode
+		m.syncSizes() // Elastic Layout: restore editor to full height
+		m.statusMsg = ""
+		return m, nil
+
+	case "f":
+		// Find Files (Fuzzy Finder)
+		m.mode = FuzzyFindMode
+		m.finderRoot = m.fileTree.rootPath
+		ti := textinput.New()
+		ti.Placeholder = "Type to search..."
+		ti.Focus()
+		ti.CharLimit = 256
+		ti.Width = 50
+		m.finderInput = ti
+		m.allFiles = nil
+		m.filteredFiles = nil
+		m.finderCursor = 0
+		m.statusMsg = "Scanning files..."
+		return m, findFilesCmd(m.finderRoot)
+
+	case "e":
+		// File Explorer
+		m.mode = NormalMode
+		m.syncSizes()
+		m.showSidebar = true
+		m.focus = FocusFileTree
+		m.statusMsg = "📂 File Tree"
+		return m, nil
+
+	case "g":
+		// Git Status
+		m.mode = NormalMode
+		m.syncSizes()
+		m.showGit = true
+		m.focus = FocusGit
+		m.git.IsLoading = true
+		m.statusMsg = "🐙 Git Status"
+		return m, checkGitStatusCmd()
+
+	case "w":
+		// Save File
+		m.mode = NormalMode
+		m.syncSizes()
+		if err := m.savePane(currPane); err != nil {
+			m.statusMsg = "❌ Error: " + err.Error()
+		} else {
+			m.statusMsg = "💾 Saved: " + currPane.Filename
+		}
+		return m, nil
+
+	case "q":
+		// Quit
+		return m, tea.Quit
+
+	case "v":
+		// Split Vertical (same logic as :vsp)
+		m.mode = NormalMode
+		curTab := m.tabs[m.activeTab]
+		if len(curTab.Panes) >= 2 {
+			m.statusMsg = "⚠ Max 2 panes"
+			return m, nil
+		}
+		newPane := m.createEmptyPane()
+		curTab.Panes = append(curTab.Panes, newPane)
+		curTab.SplitType = VerticalSplit
+		curTab.ActivePane = 1
+		m.syncSizes()
+		m.statusMsg = "┃ Vertical Split"
+		return m, nil
+
+	case "s":
+		// Split Horizontal (same logic as :sp)
+		m.mode = NormalMode
+		curTab := m.tabs[m.activeTab]
+		if len(curTab.Panes) >= 2 {
+			m.statusMsg = "⚠ Max 2 panes"
+			return m, nil
+		}
+		newPane := m.createEmptyPane()
+		curTab.Panes = append(curTab.Panes, newPane)
+		curTab.SplitType = HorizontalSplit
+		curTab.ActivePane = 1
+		m.syncSizes()
+		m.statusMsg = "━ Horizontal Split"
+		return m, nil
+
+
+
+	case "t":
+		// Open Terminal
+		m.mode = NormalMode
+		m.syncSizes()
+		return m, openTerminalCmd()
+
+	case "T":
+		// Toggle Line Numbers
+		m.mode = NormalMode
+		m.syncSizes()
+		m.relativeLineNumbers = !m.relativeLineNumbers
+		modeName := "Absolute"
+		if m.relativeLineNumbers {
+			modeName = "Relative"
+		}
+		m.statusMsg = "🔢 Line Numbers: " + modeName
+		return m, nil
+
+	case "p":
+		// Paste
+		m.mode = NormalMode
+		m.syncSizes()
+		text, err := clipboard.ReadAll()
+		if err != nil || text == "" {
+			m.statusMsg = m.tr("msg.clipboard_empty")
+		} else {
+			m.pasteToPane(currPane, text)
+			m.statusMsg = m.tr("msg.pasted")
+		}
+		return m, nil
+
+	case "l":
+		// Toggle Language
+		if m.language == LangEN { m.language = LangZH } else { m.language = LangEN }
+		m.statusMsg = fmt.Sprintf(m.tr("msg.lang_set"), m.language)
+		m.mode = NormalMode
+		return m, nil
+
+	case "?":
+		// Enter Help Mode
+		m.mode = HelpMode
+		content := m.generateHelpContent()
+		m.helpViewport.SetContent(content)
+		return m, nil
+
+	default:
+		// Unknown key - just close menu
+		m.mode = NormalMode
+		m.syncSizes()
+		m.statusMsg = ""
+		return m, nil
+	}
+}
+
+
+
+
 // executeCommand 执行 Ex 命令
-func (m *Model) executeCommand() tea.Cmd {
-	cmd := strings.TrimSpace(m.commandBuffer)
-	m.commandBuffer = ""
+func (m *Model) executeCommand(cmdStr string) tea.Cmd {
+	cmd := strings.TrimSpace(cmdStr)
 	m.mode = NormalMode
+
+	// ---------------------------------------------------------
+	// Language Command (:lang zh/en)
+	// ---------------------------------------------------------
+	if strings.HasPrefix(cmd, "lang") {
+		args := strings.Fields(cmd)
+		if len(args) > 1 {
+			switch args[1] {
+			case "zh", "cn":
+				m.language = LangZH
+			case "en":
+				m.language = LangEN
+			}
+		} else {
+			// Toggle if no arg
+			if m.language == LangZH {
+				m.language = LangEN
+			} else {
+				m.language = LangZH
+			}
+		}
+		m.statusMsg = fmt.Sprintf(m.tr("msg.lang_set"), m.language)
+		return nil
+	}
+
+	// ---------------------------------------------------------
+	// Tab Commands (:tabnew)
+	// ---------------------------------------------------------
+	if strings.HasPrefix(cmd, "tabnew") || strings.HasPrefix(cmd, "tabe") {
+		args := strings.Fields(cmd)
+		path := ""
+		if len(args) > 1 {
+			path = args[1]
+		}
+		m.createNewTab(path)
+		m.statusMsg = "New Tab Created"
+		return nil
+	}
 
 	// ---------------------------------------------------------
 	// 分屏命令 (:vsp, :sp)
 	// ---------------------------------------------------------
 	if strings.HasPrefix(cmd, "vsp") || strings.HasPrefix(cmd, "sp") {
 		// 限制: 目前只支持 2 个分屏
-		if len(m.panes) >= 2 {
+		curTab := m.tabs[m.activeTab]
+		if len(curTab.Panes) >= 2 {
 			m.statusMsg = "⚠ Max 2 panes supported in MVP"
 			return nil
 		}
@@ -1532,28 +2125,26 @@ func (m *Model) executeCommand() tea.Cmd {
 		var err error
 
 		if len(args) > 1 {
-			// 打开指定文件 (存在或新建)
-			path := args[1]
-			newPane, err = m.createPaneFromFile(path)
+			// 打开新文件
+			newPane, err = m.createPaneFromFile(args[1])
 			if err != nil {
-				m.statusMsg = fmt.Sprintf("⚠ Error opening file: %v", err)
+				m.statusMsg = fmt.Sprintf("Error opening file: %v", err)
 				return nil
 			}
 		} else {
-			// 克隆当前 Pane
+			// 克隆当前文件 (Duplicate view)
 			newPane = m.cloneActivePane()
 		}
 
-		// 添加 Pane
-		m.panes = append(m.panes, newPane)
-		m.activePane = 1 // 切换到新 Pane
+		curTab.Panes = append(curTab.Panes, newPane)
+		curTab.ActivePane = 1
 		
 		if strings.HasPrefix(cmd, "vsp") {
-			m.splitType = VerticalSplit
+			curTab.SplitType = VerticalSplit
 		} else {
-			m.splitType = HorizontalSplit
+			curTab.SplitType = HorizontalSplit
 		}
-
+		
 		m.syncSizes()
 		m.statusMsg = "Split created"
 		return nil
@@ -1561,28 +2152,36 @@ func (m *Model) executeCommand() tea.Cmd {
 
 	switch cmd {
 	case "q", "quit":
-		// 如果有多个分屏，只关闭当前分屏
-		if len(m.panes) > 1 {
-			// Remove current pane
-			// Since only 2 panes, if we close one, we revert to single pane
-			// Keep the *other* pane
+		curTab := m.tabs[m.activeTab]
+		
+		// 1. 如果有多个分屏，只关闭当前分屏
+		if len(curTab.Panes) > 1 {
 			keepIndex := 0
-			if m.activePane == 0 {
+			if curTab.ActivePane == 0 {
 				keepIndex = 1
 			}
-			m.panes = []*EditorPane{m.panes[keepIndex]}
-			m.activePane = 0
-			m.splitType = NoSplit
+			curTab.Panes = []*EditorPane{curTab.Panes[keepIndex]}
+			curTab.ActivePane = 0
+			curTab.SplitType = NoSplit
 			m.syncSizes()
 			m.statusMsg = "Pane closed"
 			return nil
 		}
-		// 只有一个分屏，退出程序
+		
+		// 2. 如果只有一个分屏，尝试关闭 Tab
+		if len(m.tabs) > 1 {
+			m.closeActiveTab()
+			m.statusMsg = "Tab closed"
+			return nil
+		}
+		
+		// 3. 只有一个 Tab 一个分屏，退出程序
 		return tea.Quit
 
 	case "w", "write":
 		// 保存文件
-		currPane := m.panes[m.activePane]
+		curTab := m.tabs[m.activeTab]
+		currPane := curTab.Panes[curTab.ActivePane]
 		if currPane.Filename == "" {
 			m.statusMsg = "⚠ 未指定文件名，使用 :w 文件名 (Save as not impl)"
 		} else {
@@ -1600,25 +2199,33 @@ func (m *Model) executeCommand() tea.Cmd {
 		}
 
 	case "wq", "x":
-		currPane := m.panes[m.activePane]
+		curTab := m.tabs[m.activeTab]
+		currPane := curTab.Panes[curTab.ActivePane]
 		if currPane.Filename != "" {
 			if err := m.savePane(currPane); err != nil {
 				m.statusMsg = fmt.Sprintf("⚠ 保存失败: %v", err)
 				return nil
 			}
+		} else {
+			m.statusMsg = "⚠ 未指定文件名"
+			return nil
 		}
-		
-		// Close logic (duplicate of :q)
-		if len(m.panes) > 1 {
+		// Quit logic (Reuse case q logic? easier to copy since we can't goto case)
+		if len(curTab.Panes) > 1 {
 			keepIndex := 0
-			if m.activePane == 0 { keepIndex = 1 }
-			m.panes = []*EditorPane{m.panes[keepIndex]}
-			m.activePane = 0
-			m.splitType = NoSplit
+			if curTab.ActivePane == 0 {	keepIndex = 1 }
+			curTab.Panes = []*EditorPane{curTab.Panes[keepIndex]}
+			curTab.ActivePane = 0
+			curTab.SplitType = NoSplit
 			m.syncSizes()
 			return nil
 		}
+		if len(m.tabs) > 1 {
+			m.closeActiveTab()
+			return nil
+		}
 		return tea.Quit
+
 	// Note: Skipped some cases for brevity, keep rest...
 	case "q!":
 		return tea.Quit
@@ -1682,7 +2289,8 @@ func (m *Model) executeCommand() tea.Cmd {
 			// Save as... logic
 			args := strings.Fields(cmd)
 			if len(args) > 1 {
-				currPane := m.panes[m.activePane]
+				curTab := m.tabs[m.activeTab]
+				currPane := curTab.Panes[curTab.ActivePane]
 				currPane.Filename = args[1]
 				m.savePane(currPane)
 				m.statusMsg = fmt.Sprintf("Saved as \"%s\"", currPane.Filename)
@@ -1879,10 +2487,11 @@ func (m Model) handleFileTreeMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.fileTree.cursor = 0
 				return m, loadDirectoryCmd(entry.path)
 			} else {
-				m.panes[m.activePane].Filename = entry.path
+				// Open in NEW TAB
+				m.createNewTab(entry.path)
 				m.focus = FocusEditor
 				m.mode = NormalMode
-				return m, loadFileCmd(entry.path)
+				return m, nil
 			}
 		}
 
@@ -1946,7 +2555,8 @@ func (m Model) handleFileTreeMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleInsertMode 处理插入模式下的按键
 func (m Model) handleInsertMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	currPane := m.panes[m.activePane]
+	curTab := m.tabs[m.activeTab]
+	currPane := curTab.Panes[curTab.ActivePane]
 
 	switch msg.Type {
 	case tea.KeyEsc:
@@ -2311,7 +2921,8 @@ func (m *Model) predictCode() {
 	}
 
 	// 只发送当前行做上下文 (MVP 简化)
-	currPane := m.panes[m.activePane]
+	curTab := m.tabs[m.activeTab]
+	currPane := curTab.Panes[curTab.ActivePane]
 	if currPane.CursorY >= len(currPane.Lines) { return }
 	currentLine := currPane.Lines[currPane.CursorY]
 	
@@ -2358,6 +2969,10 @@ func (m *Model) predictCode() {
 
 // syncSizes 立即同步布局尺寸 (解决 State Lag 问题)
 func (m *Model) syncSizes() {
+	// Sync Help Viewport
+	m.helpViewport.Width = m.width - 6
+	m.helpViewport.Height = m.height - 4
+
 	// 侧边栏逻辑
 	sidebarWidth := 0
 	if m.showSidebar || m.showGit {
@@ -2370,64 +2985,77 @@ func (m *Model) syncSizes() {
 		editorTotalWidth = 10
 	}
 
-	// 动态高度逻辑: 实时渲染状态栏以获取其实际高度
-	statusBar := m.renderStatusBar()
-	statusBarHeight := lipgloss.Height(statusBar)
+	// 动态高度逻辑: 严谨的垂直空间预算 (Strict Vertical Budgeting)
+	availableHeight := m.height
 
-	editorTotalHeight := m.height - statusBarHeight
-	if editorTotalHeight < 0 {
-		editorTotalHeight = 0
+	// 1. Always subtract the Header (Top Tab Bar)
+	// We restore HeaderHeight for the Tabs
+	availableHeight -= 1 
+
+	// 2. Subtract Bottom Element based on Mode
+	if m.mode == WhichKeyMode {
+		availableHeight -= WhichKeyHeight
+	} else {
+		// Normal mode has a status bar
+		availableHeight -= StatusBarHeight
 	}
+
+	// Safeguard
+	if availableHeight < 0 {
+		availableHeight = 0
+	}
+
+	editorTotalHeight := availableHeight
 
 	// 更新缓存值
 	m.cachedSidebarWidth = sidebarWidth
 	m.cachedEditorWidth = editorTotalWidth
 	m.cachedContentHeight = editorTotalHeight
 
-	// 分配 Pane 尺寸
-	if len(m.panes) == 0 {
+	// 更新 FileTree 尺寸
+	if m.fileTree.State != TreeNormal {
+		// m.fileTree.SetSize(sidebarWidth, editorTotalHeight)
+	}
+
+	// 分配 Pane 尺寸 (Active Tab Only)
+	if len(m.tabs) == 0 { return }
+	activeTab := m.tabs[m.activeTab]
+	
+	if len(activeTab.Panes) == 0 {
 		return
 	}
 
-	for i, pane := range m.panes {
+	for i, pane := range activeTab.Panes {
 		width := editorTotalWidth
 		height := editorTotalHeight
 
-		if m.splitType == VerticalSplit {
+		if activeTab.SplitType == VerticalSplit {
 			width = editorTotalWidth / 2
-			// 修正: 如果是左边的 Pane，且总宽是奇数，或者右边有边框?
-			// 简单起见，均分，中间加个边框? View 渲染时再处理边框占位
-			// 这里假设 Viewport 占满分配的区域
-			// 如果有 2 个 Pane，每个占一半。
-			// 为了给中间竖线留位置，宽度 -1
-			if len(m.panes) > 1 {
+			if len(activeTab.Panes) > 1 {
 				width = (editorTotalWidth - 1) / 2
 			}
-		} else if m.splitType == HorizontalSplit {
-			if len(m.panes) > 1 {
+			// Fix parity for last one?
+			if i == len(activeTab.Panes)-1 && len(activeTab.Panes) > 1 {
+				// remaining = total - (n-1)*width - (n-1)*separator
+				// Simple 2 pane logic:
+				width = editorTotalWidth - width - 1
+			}
+		} else if activeTab.SplitType == HorizontalSplit {
+			height = editorTotalHeight / 2
+			if len(activeTab.Panes) > 1 {
 				height = (editorTotalHeight - 1) / 2
+			}
+			if i == len(activeTab.Panes)-1 && len(activeTab.Panes) > 1 {
+				height = editorTotalHeight - height - 1
 			}
 		}
 
-		// Update pane outer dimensions
 		pane.Width = width
 		pane.Height = height
-		
-		// 如果只有一个 Pane，确保利用剩余的像素 (奇数情况)
-		if i == 1 {
-			if m.splitType == VerticalSplit {
-				width = editorTotalWidth - m.panes[0].Width - 1
-			} else if m.splitType == HorizontalSplit {
-				height = editorTotalHeight - m.panes[0].Height - 1
-			}
-			pane.Width = width
-			pane.Height = height
-		}
-		
-		// Update Viewport inner dimensions immediately
-		pane.Viewport.Width = width - 2
-		pane.Viewport.Height = height - 2
+		pane.Viewport.Width = width
+		pane.Viewport.Height = height
 	}
+
 }
 
 // calculateSizes 集中计算布局尺寸 (Atomic Layout)
@@ -2455,9 +3083,84 @@ func (m Model) calculateSizes() (int, int, int, int) {
 	return sidebarWidth, editorWidth, contentHeight, contentHeight
 }
 
+// viewHeader 渲染顶部标题栏
+func (m Model) viewHeader() string {
+	style := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("252")).
+		Background(lipgloss.Color("235")). // Dark header background
+		Bold(true).
+		Padding(0, 1).
+		Width(m.width).
+		Height(HeaderHeight) // Strict height
+
+	// Simple title
+	title := "FuckVim 🚀"
+	if len(m.tabs) > 0 {
+		curTab := m.tabs[m.activeTab]
+		if len(curTab.Panes) > 0 {
+			active := curTab.Panes[curTab.ActivePane]
+			if active.Filename != "" {
+				title += " | " + active.Filename
+			}
+		}
+	}
+	// Add some hint
+	hint := "Space=Menu"
+	
+	// Flex layout: Title ...... Hint
+	spaces := m.width - lipgloss.Width(title) - lipgloss.Width(hint) - 2 // -2 padding
+	if spaces < 1 { spaces = 1 }
+	
+	content := title + strings.Repeat(" ", spaces) + hint
+	return style.Render(content)
+}
+
+// viewTabs 渲染顶部标签栏
+func (m Model) viewTabs() string {
+	var tabs []string
+	for i, t := range m.tabs {
+		name := fmt.Sprintf(" %d: %s ", i+1, t.Name)
+		
+		// Styling
+		style := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Background(lipgloss.Color("235")).
+			Padding(0, 1)
+
+		if i == m.activeTab {
+			style = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("232")). // Dark Text
+				Background(lipgloss.Color("205")). // Pink Bg
+				Bold(true).
+				Padding(0, 1)
+		}
+		
+		tabs = append(tabs, style.Render(name))
+	}
+	
+	// Fill rest of line?
+	row := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
+	bg := lipgloss.NewStyle().Background(lipgloss.Color("235")).Width(m.width - lipgloss.Width(row)).Render("")
+	
+	return lipgloss.JoinHorizontal(lipgloss.Top, row, bg)
+}
+
 // View 渲染 UI
 func (m Model) View() string {
-	// 如果终端尺寸太小，显示提示
+	
+	// 0. Help Overlay (Highest Priority)
+	if m.mode == HelpMode {
+		style := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("62")).
+			Padding(1, 2).
+			Width(m.width - 4).
+			Height(m.height - 2)
+			
+		return style.Render(m.helpViewport.View())
+	}
+
+	// 1. 确保尺寸同步
 	if m.width < 40 || m.height < 10 {
 		return "窗口太小，请调整尺寸 (Window too small)"
 	}
@@ -2466,6 +3169,11 @@ func (m Model) View() string {
 	if m.mode == FuzzyFindMode {
 		return m.renderFuzzyFinder()
 	}
+
+	// 1. Render Header (Tab Bar)
+	header := m.viewTabs()
+
+	// 2. Main Content Layout (Sidebar & Editor) follows...
 
 	// 1. 原子化计算布局尺寸
 	sidebarWidth, editorWidth, sidebarHeight, editorHeight := m.calculateSizes()
@@ -2496,44 +3204,109 @@ func (m Model) View() string {
 	var editorView string
 	editorHasFocus := m.focus == FocusEditor
 	
-	if len(m.panes) == 0 {
-		editorView = "" // Should not happen
-	} else if len(m.panes) == 1 {
-		// Single Pane
-		editorView = m.renderPane(m.panes[0], editorWidth, editorHeight, editorHasFocus && m.activePane == 0)
-	} else {
-		// Split Pane
-		pane0 := m.renderPane(m.panes[0], m.panes[0].Width, m.panes[0].Height, editorHasFocus && m.activePane == 0)
-		pane1 := m.renderPane(m.panes[1], m.panes[1].Width, m.panes[1].Height, editorHasFocus && m.activePane == 1)
-
-		if m.splitType == VerticalSplit {
-			// Add border in between? renderPane already has border.
-			editorView = lipgloss.JoinHorizontal(lipgloss.Top, pane0, pane1)
+	if len(m.tabs) > 0 {
+		curTab := m.tabs[m.activeTab]
+		if len(curTab.Panes) == 0 {
+			editorView = "" // Should not happen
+		} else if len(curTab.Panes) == 1 {
+			// Single Pane
+			editorView = m.renderPane(curTab.Panes[0], editorWidth, editorHeight, editorHasFocus && curTab.ActivePane == 0)
 		} else {
-			editorView = lipgloss.JoinVertical(lipgloss.Left, pane0, pane1)
+			// Split Pane
+			pane0 := m.renderPane(curTab.Panes[0], curTab.Panes[0].Width, curTab.Panes[0].Height, editorHasFocus && curTab.ActivePane == 0)
+			pane1 := m.renderPane(curTab.Panes[1], curTab.Panes[1].Width, curTab.Panes[1].Height, editorHasFocus && curTab.ActivePane == 1)
+
+			if curTab.SplitType == VerticalSplit {
+				editorView = lipgloss.JoinHorizontal(lipgloss.Top, pane0, pane1)
+			} else {
+				editorView = lipgloss.JoinVertical(lipgloss.Left, pane0, pane1)
+			}
 		}
+	} else {
+		editorView = "No Tabs Open"
 	}
 
 	// 强制编辑器精确尺寸
 	editorView = lipgloss.Place(editorWidth, editorHeight, lipgloss.Left, lipgloss.Top, editorView)
 
-	// 4. 合成主布局
-	var mainContent string
-	if leftPanel != "" {
-		mainContent = lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, editorView)
+	// 5. Main Content Assembly
+	mainContent := lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, editorView)
+
+	// 6. 渲染底部区域 (Menu or Status Bar or Command Input)
+	var bottom string
+	if m.mode == WhichKeyMode {
+		// Force exact height for menu to prevent overflow or gaps
+		// Using WhichKeyHeight which is accounted for in calculateSizes
+		style := lipgloss.NewStyle().Height(WhichKeyHeight).MaxHeight(WhichKeyHeight)
+		bottom = style.Render(m.viewWhichKey())
+	} else if m.mode == CommandMode {
+		// Command Input Bar (Vim Style)
+		style := lipgloss.NewStyle().
+			Width(m.width).
+			Background(lipgloss.Color("235")). // Dark gray
+			Foreground(lipgloss.Color("255"))  // White text
+		bottom = style.Render(m.commandInput.View())
 	} else {
-		mainContent = editorView
+		// Normal Status Bar (Powerline)
+		bottom = m.renderStatusBar()
 	}
 
-	// 5. 渲染状态栏 (底部)
-	statusBar := m.renderStatusBar()
+	// 7. Final Strict Assembly: Header + Main + Bottom
+	frame := lipgloss.JoinVertical(lipgloss.Left, header, mainContent, bottom)
 
-	// 6. Final assembly
-	frame := lipgloss.JoinVertical(lipgloss.Left, mainContent, statusBar)
-
-	// 7. Full-Frame Lock: 强制最终输出为精确尺寸
-	// 这保证每次渲染的字符串结构完全一致，终端可以正确地原地覆盖像素
+	// 8. Full-Frame Lock
 	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, frame)
+}
+
+// viewWhichKey 渲染 WhichKey 菜单 (LazyVim-style Leader Key Menu)
+func (m Model) viewWhichKey() string {
+	// Styles
+	keyStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("205")).
+		Bold(true)
+	arrowStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("241"))
+	descStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("252"))
+	titleStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("220")).
+		Bold(true)
+
+	// Build rows
+	var rows []string
+	for _, item := range rootKeys {
+		row := fmt.Sprintf("%s %s %s",
+			keyStyle.Render(item.Key),
+			arrowStyle.Render("→"),
+			descStyle.Render(m.tr(item.Desc))) // Translated
+		rows = append(rows, row)
+	}
+
+	// Split into 2 columns
+	mid := (len(rows) + 1) / 2
+	col1 := strings.Join(rows[:mid], "\n")
+	col2 := ""
+	if mid < len(rows) {
+		col2 = strings.Join(rows[mid:], "\n")
+	}
+
+	// Join columns with gap
+	colStyle := lipgloss.NewStyle().Width(m.width/2 - 4)
+	body := lipgloss.JoinHorizontal(lipgloss.Top,
+		colStyle.Render(col1),
+		colStyle.Render(col2))
+
+	// Container
+	containerStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(1, 2).
+		Width(m.width - 4)
+
+	title := titleStyle.Render("⌨ WhichKey Menu  (Space/Esc to close)")
+	content := fmt.Sprintf("%s\n\n%s", title, body)
+
+	return containerStyle.Render(content)
 }
 
 // renderFuzzyFinder 渲染模糊搜索弹窗
@@ -2555,7 +3328,7 @@ func (m Model) renderFuzzyFinder() string {
 	titleStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("205")).
 		Bold(true)
-	content.WriteString(titleStyle.Render("🔍 Fuzzy Find Files"))
+	content.WriteString(titleStyle.Render(m.tr("find.title")))
 	content.WriteString("\n\n")
 
 	// Input field
@@ -2957,7 +3730,7 @@ func (m Model) renderSidebar(width, height int) string {
 			Foreground(lipgloss.Color("196")).
 			Bold(true)
 		fileName := filepath.Base(m.fileTree.Selected)
-		confirmText := confirmStyle.Render(fmt.Sprintf("⚠️ Delete %s? (y/n)", fileName))
+		confirmText := confirmStyle.Render(fmt.Sprintf("⚠️ "+m.tr("tree.delete_confirm"), fileName))
 		lines = append(lines, confirmText)
 	}
 
@@ -2992,29 +3765,28 @@ func (m Model) renderGit(width, height int) string {
 	}
 
 	if len(m.git.Files) == 0 {
-		// Sync Dashboard
+		// Sync Dashboard (Translated)
 		output := "\n"
-		output += fmt.Sprintf("  ✨ On branch: %s\n", lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render(m.git.Branch))
-		output += "  Working Tree Clean\n\n"
+		branchStr := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render(m.git.Branch)
+		output += fmt.Sprintf("  ✨ Branch: %s\n", branchStr)
+		
+		output += fmt.Sprintf("  %s\n", m.tr("git.clean"))
+		output += fmt.Sprintf("  %s\n\n", m.tr("git.clean_sub"))
 		
 		if m.git.Ahead == 0 && m.git.Behind == 0 {
-			output += "  ✅ Up to date with remote"
+			output += "  ✅ Up to date"
 		} else {
 			if m.git.Ahead > 0 {
-				output += fmt.Sprintf("  🚀 Ahead: %d commit(s)\n", m.git.Ahead)
+				output += fmt.Sprintf("  %s: %d %s\n", m.tr("git.ahead"), m.git.Ahead, m.tr("git.ahead_sub"))
 			}
 			if m.git.Behind > 0 {
-				output += fmt.Sprintf("  ⬇️ Behind: %d commit(s)\n", m.git.Behind)
+				output += fmt.Sprintf("  %s: %d\n", m.tr("git.behind"), m.git.Behind)
 			}
-			output += "\n  (Press 'Shift+P' to Push)"
+			output += fmt.Sprintf("\n  %s", m.tr("git.push_hint"))
+			output += fmt.Sprintf("\n  %s", m.tr("git.pull_hint"))
 		}
 		
-		// 填充空白行以保持布局一致 (可选)
-		// 这里我们直接返回 lipgloss 渲染结果，renderWindow 会处理边框，
-		// 但高度填充需要自己做吗？ renderWindow 接受 content string.
-		// 为了垂直对齐，我们可以 append plain newlines to output
-		
-		return renderWindow(output, "Git-Clean", m.focus == FocusGit, width, height, false)
+		return renderWindow(output, m.tr("wk.git"), m.focus == FocusGit, width, height, false)
 	}
 
 	// Git Repo Content
@@ -3070,9 +3842,9 @@ func (m Model) renderGit(width, height int) string {
 	}
 
 	// Determine Title State
-	title := "Git-Clean"
+	title := m.tr("wk.git")
 	if len(m.git.Files) > 0 {
-		title = "Git-Dirty"
+		title += " *" // Add helper indicator for dirty
 	}
 
 	isActive := m.focus == FocusGit
@@ -3080,67 +3852,130 @@ func (m Model) renderGit(width, height int) string {
 }
 
 
-
 // renderLine removed (obsolete)
 
-// renderStatusBar 渲染状态栏
-func (m Model) renderStatusBar() string {
-	// 模式指示器
-	var modeIndicator string
-	
-	// 优先显示焦点状态
-	if m.focus == FocusGit {
-		modeIndicator = gitHeaderStyle.Background(lipgloss.Color("205")).Foreground(lipgloss.Color("230")).Padding(0, 1).Render(" GIT ")
-	} else if m.focus == FocusFileTree {
-		modeIndicator = treeModeStyle.Render(" TREE ")
-	} else {
-		// 编辑器或全局模式
-		switch m.mode {
-		case NormalMode:
-			modeIndicator = normalModeStyle.Render(" NORMAL ")
-		case InsertMode:
-			modeIndicator = insertModeStyle.Render(" INSERT ")
-		case CommandMode:
-			modeIndicator = commandModeStyle.Render(" COMMAND ")
-		default:
-			modeIndicator = normalModeStyle.Render(" NORMAL ")
-		}
+// getModeInfo Helper for Status Bar Colors
+func (m Model) getModeInfo() (string, lipgloss.Color) {
+	switch m.mode {
+	case InsertMode:
+		return m.tr("status.insert"), lipgloss.Color("42") // Green
+	case CommandMode, FuzzyFindMode:
+		return m.tr("status.command"), lipgloss.Color("208") // Orange
+	case WhichKeyMode:
+		return "WHICH-KEY", lipgloss.Color("205") // Pink
+	case HelpMode: // Add HelpMode case
+		return "HELP", lipgloss.Color("63") // Cyan for Help
+	default:
+		return m.tr("status.normal"), lipgloss.Color("33") // Blue
 	}
-
-	// 位置信息
-	var cx, cy int
-	if len(m.panes) > m.activePane {
-		cx = m.panes[m.activePane].CursorX + 1
-		cy = m.panes[m.activePane].CursorY + 1
-	}
-	position := fmt.Sprintf(" Ln %d, Col %d ", cy, cx)
-
-	// 插件状态
-	pluginStatus := " WASM: OK "
-	if m.pluginError != nil {
-		pluginStatus = " WASM: ERR "
-	}
-
-	// 计算中间部分 (包含消息)
-	leftPart := modeIndicator
-	rightPart := statusBarStyle.Render(pluginStatus) + statusBarStyle.Render(position)
-	
-	// Available width for middle
-	availWidth := m.width - lipgloss.Width(leftPart) - lipgloss.Width(rightPart)
-	if availWidth < 0 { availWidth = 0 }
-
-	// Msg styling
-	msg := m.statusMsg
-	
-	// 不再强制截断 msg 到单行剩余宽度，
-	// 而是允许其在样式器中自动折行（或由 renderStatusBar 的调用者根据 Width 限制）
-	// 但为了保持左右对齐的视觉效果，我们仍然计算中间部分的填充
-	
-	middleContent := fmt.Sprintf(" %s", msg)
-	middlePart := statusBarStyle.Width(availWidth).Render(middleContent)
-
-	return leftPart + middlePart + rightPart
 }
+
+// renderStatusBar 渲染状态栏 (Powerline / Lualine Style)
+func (m Model) renderStatusBar() string {
+    // 1. Get Data from Active Pane
+    if len(m.tabs) == 0 { return "" }
+    currentTab := m.tabs[m.activeTab]
+    if len(currentTab.Panes) == 0 { return "" }
+    pane := currentTab.Panes[currentTab.ActivePane]
+    
+    // Data points
+    modeLabel, modeColor := m.getModeInfo()
+    gitBranch := m.git.Branch
+    if gitBranch == "" { gitBranch = "master" } // Fallback or empty if not repo
+    filename := pane.Filename
+    if filename == "" { filename = "[No Name]" }
+    
+    // Cursor Info
+    cursorRow := pane.CursorY + 1
+    cursorCol := pane.CursorX + 1 
+    
+    // 2. Define Styles
+    // Colors
+    colorGray := lipgloss.Color("237")
+    colorLightGray := lipgloss.Color("245")
+    colorWhite := lipgloss.Color("255")
+    
+    // Symbols
+    arrow := "\uE0B0" 
+    arrowLeft := "\uE0B2"
+    
+    // Style Builders
+    // A. Mode Block
+    styleMode := lipgloss.NewStyle().
+        Foreground(lipgloss.Color("232")). // Dark Text
+        Background(modeColor).
+        Bold(true).
+        Padding(0, 1)
+        
+    // B. Git Block
+    styleGit := lipgloss.NewStyle().
+        Foreground(colorWhite).
+        Background(colorGray).
+        Padding(0, 1)
+
+    // C. Filename Block (Middle)
+    styleFile := lipgloss.NewStyle().
+        Foreground(colorLightGray). // Grey text
+        Background(lipgloss.Color("235")). // Darker Gray
+        Padding(0, 1)
+        
+    // D. Right Meta Block
+    styleMeta := lipgloss.NewStyle().
+        Foreground(colorWhite).
+        Background(colorGray).
+        Padding(0, 1)
+
+    // E. Coordinate Block
+    styleCoord := lipgloss.NewStyle().
+        Foreground(lipgloss.Color("232")).
+        Background(modeColor). // Match Mode color for symmetry
+        Bold(true).
+        Padding(0, 1)
+
+    // 3. Render Segments with Transitions (The Powerline Trick)
+    
+    // --- LEFT SIDE ---
+    // Mode -> Arrow(ModeColor to Gray) -> Git
+    segMode := styleMode.Render(modeLabel)
+    arrow1 := lipgloss.NewStyle().Foreground(modeColor).Background(colorGray).Render(arrow)
+    
+    // Git -> Arrow(Gray to DarkGray) -> File
+    segGit := styleGit.Render(" " + gitBranch)
+    arrow2 := lipgloss.NewStyle().Foreground(colorGray).Background(lipgloss.Color("235")).Render(arrow)
+    
+    segFile := styleFile.Render(filename)
+    // End of left side arrow (DarkGray to Transparent/Black)
+    // Assuming default terminal bg (Color 0 or Transparent)
+    // But lipgloss Default Background is usually Terminal BG.
+    // If we want transparency, maybe no background?
+    // Let's assume Black ("234" or "0") matches terminal mostly.
+    arrow3 := lipgloss.NewStyle().Foreground(lipgloss.Color("235")).Render(arrow) 
+
+    // --- RIGHT SIDE ---
+    
+    // Transparent -> Gray
+    arrowR1 := lipgloss.NewStyle().Foreground(colorGray).Render(arrowLeft)
+    segType := styleMeta.Render("UTF-8 | Go") // Hardcoded for MVP, dynamic later
+    
+    // Gray -> ModeColor
+    arrowR2 := lipgloss.NewStyle().Foreground(modeColor).Background(colorGray).Render(arrowLeft)
+    segCoord := styleCoord.Render(fmt.Sprintf("Ln %d, Col %d", cursorRow, cursorCol))
+
+    // 4. Spacer (Push right side to the edge)
+    leftBlock := lipgloss.JoinHorizontal(lipgloss.Bottom, segMode, arrow1, segGit, arrow2, segFile, arrow3)
+    rightBlock := lipgloss.JoinHorizontal(lipgloss.Bottom, arrowR1, segType, arrowR2, segCoord)
+    
+    // Calculate available width
+    w := lipgloss.Width
+    availableWidth := m.width - w(leftBlock) - w(rightBlock)
+    if availableWidth < 0 { availableWidth = 0 }
+    
+    spacer := lipgloss.NewStyle().Width(availableWidth).Render("")
+    
+    // 5. Final Join
+    return lipgloss.JoinHorizontal(lipgloss.Top, leftBlock, spacer, rightBlock)
+}
+
 
 // =============================================================================
 // 主函数
