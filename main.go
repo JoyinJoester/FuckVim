@@ -40,6 +40,13 @@ import (
 )
 
 // =============================================================================
+// 全局变量
+// =============================================================================
+
+// globalProgram 让 LSP 协程能发消息回 UI 主线程
+var globalProgram *tea.Program
+
+// =============================================================================
 // 常量定义
 // =============================================================================
 
@@ -47,7 +54,7 @@ const (
 	// Layout Constants
 	HeaderHeight    = 1  // Top Tab Grid
 	StatusBarHeight = 1  // Bottom Status Bar
-	WhichKeyHeight  = 12 // Bottom Menu (Fixed Height)
+	WhichKeyHeight  = 15 // Bottom Menu (Fixed Height)
 
 	// I18n Language Constants
 	LangEN = "en"
@@ -85,6 +92,7 @@ var translations = map[string]map[string]string{
 		"wk.paste":     "Paste",
 		"wk.terminal":  "Terminal",
 		"wk.lang":      "Switch Language",
+		"wk.toggle_completion": "Toggle Completion",
 		"wk.help":      "Help / Keys",
 
 		// Git Dashboard
@@ -137,6 +145,7 @@ var translations = map[string]map[string]string{
 		"wk.paste":     "粘贴",
 		"wk.terminal":  "终端",
 		"wk.lang":      "切换语言",
+		"wk.toggle_completion": "开关补全",
 		"wk.help":      "帮助 / 快捷键",
 
 		// Git Dashboard
@@ -264,6 +273,7 @@ var rootKeys = []KeyMenuItem{
 	{Key: "T", Desc: "wk.toggle_nu"},
 	{Key: "p", Desc: "wk.paste"},
 	{Key: "l", Desc: "wk.lang"},
+	{Key: "c", Desc: "wk.toggle_completion"},
 	{Key: "?", Desc: "wk.help"},
 }
 
@@ -417,6 +427,7 @@ type EditorPane struct {
 	CursorY  int
 	Width    int // Allocated outer width
 	Height   int // Allocated outer height
+	LSPVersion int // LSP 文档版本号（每次编辑递增）
 }
 
 // SplitType 分屏类型
@@ -525,6 +536,16 @@ type Model struct {
 	// Editor Preferences
 	// ----------------------------------------------------
 	relativeLineNumbers bool // true = Hybrid Vim-style, false = Absolute standard
+
+	lsp     *LSPClient
+	lspInit bool // 是否已经初始化完成
+
+	// 补全相关 (使用简单静态补全)
+	completions       []CompletionItemSimple // 当前补全候选项
+	showCompletion    bool                   // 是否显示补全菜单
+	completionIdx     int                    // 当前选中的候选项索引
+	completionPrefix  string                 // 触发补全时的前缀
+	completionEnabled bool                   // 是否启用自动补全功能
 }
 
 // =============================================================================
@@ -606,6 +627,10 @@ func initialModel() Model {
 		git: GitModel{
 			IsLoading: true,
 		},
+		// LSP 客户端
+		lsp: NewLSPClient(),
+		// 补全功能默认启用
+		completionEnabled: true,
 	}
 
 	return m
@@ -624,23 +649,38 @@ func (m Model) generateHelpContent() string {
 	sections := []struct{ TitleEN, TitleZH, ContentEN, ContentZH string }{
 		{
 			"Global / Navigation", "全局 / 导航",
-			"  Space       : Open WhichKey Menu\n  Ctrl+p      : Fuzzy Find Files\n  Shift+h/l   : Switch Tabs\n  Ctrl+h/j/k/l: Move focus between Panes",
-			"  Space       : 打开快捷键菜单\n  Ctrl+p      : 模糊搜索文件\n  Shift+h/l   : 切换标签页\n  Ctrl+h/j/k/l: 在分屏间切换焦点",
+			"  Space       : Open WhichKey Menu\n  Ctrl+p      : Fuzzy Find Files\n  Ctrl+t      : Open Terminal\n  Shift+h/l   : Switch Tabs\n  Ctrl+h/j/k/l: Move focus between Panes",
+			"  Space       : 打开快捷键菜单\n  Ctrl+p      : 模糊搜索文件\n  Ctrl+t      : 打开终端\n  Shift+h/l   : 切换标签页\n  Ctrl+h/j/k/l: 在分屏间切换焦点",
 		},
 		{
 			"Normal Mode", "普通模式",
-			"  h/j/k/l     : Move Cursor\n  i           : Insert Mode\n  :           : Command Mode\n  /           : Search in File",
-			"  h/j/k/l     : 移动光标\n  i           : 进入编辑模式\n  :           : 进入命令模式\n  /           : 文件内搜索",
+			"  h/j/k/l     : Move Cursor\n  0 / $       : Line Start / End\n  i           : Insert Mode\n  :           : Command Mode\n  p           : Paste",
+			"  h/j/k/l     : 移动光标\n  0 / $       : 行首 / 行尾\n  i           : 进入编辑模式\n  :           : 进入命令模式\n  p           : 粘贴",
+		},
+		{
+			"Insert Mode", "插入模式",
+			"  Esc         : Back to Normal\n  Enter       : New Line (Smart Indent)\n  Tab         : Accept Completion\n  Backspace   : Delete (Auto-Pairs)\n  Ctrl+v      : Paste",
+			"  Esc         : 返回普通模式\n  Enter       : 换行 (智能缩进)\n  Tab         : 接受补全\n  Backspace   : 删除 (自动括号配对)\n  Ctrl+v      : 粘贴",
+		},
+		{
+			"WhichKey Menu (Space)", "WhichKey 菜单 (空格)",
+			"  f : Find Files    t : Terminal\n  e : File Tree     T : Line Numbers\n  g : Git Panel     p : Paste\n  w : Save          l : Language\n  q : Quit          c : Completion\n  v : VSplit        ? : Help\n  s : HSplit",
+			"  f : 查找文件      t : 终端\n  e : 文件树        T : 行号模式\n  g : Git 面板      p : 粘贴\n  w : 保存          l : 切换语言\n  q : 退出          c : 开关补全\n  v : 垂直分屏      ? : 帮助\n  s : 水平分屏",
 		},
 		{
 			"File Tree (Sidebar)", "文件树 (侧边栏)",
-			"  j/k         : Navigate\n  Enter       : Open File / Toggle Dir\n  a           : Create File\n  d           : Delete File\n  r           : Rename File",
-			"  j/k         : 上下移动\n  Enter       : 打开文件 / 折叠目录\n  a           : 新建文件\n  d           : 删除文件\n  r           : 重命名",
+			"  j/k         : Navigate\n  Enter       : Open File / Toggle Dir\n  Backspace   : Go Up\n  a           : New File (add / for Dir)\n  d           : Delete\n  r           : Rename",
+			"  j/k         : 上下移动\n  Enter       : 打开文件 / 折叠目录\n  Backspace   : 返回上级\n  a           : 新建文件 (加/创建目录)\n  d           : 删除\n  r           : 重命名",
+		},
+		{
+			"Git Panel", "Git 面板",
+			"  Space       : Stage / Unstage\n  c           : Commit (staged)\n  C           : Stage All + Commit\n  P           : Push\n  r           : Refresh\n  E           : Edit .git/config",
+			"  Space       : 暂存 / 取消暂存\n  c           : 提交 (已暂存)\n  C           : 全部暂存 + 提交\n  P           : 推送\n  r           : 刷新状态\n  E           : 编辑 .git/config",
 		},
 		{
 			"Commands", "常用命令",
-			"  :w          : Save\n  :q          : Quit\n  :vsp [file] : Vertical Split\n  :sp [file]  : Horizontal Split\n  :lang [en/zh]: Switch Language",
-			"  :w          : 保存\n  :q          : 退出\n  :vsp [文件] : 左右分屏\n  :sp [文件]  : 上下分屏\n  :lang [en/zh]: 切换语言",
+			"  :w          : Save\n  :q          : Quit\n  :wq         : Save & Quit\n  :vsp [file] : Vertical Split\n  :sp [file]  : Horizontal Split\n  :tabnew     : New Tab\n  :tree       : Toggle File Tree\n  :git        : Toggle Git Panel\n  :lang [en/zh]: Switch Language",
+			"  :w          : 保存\n  :q          : 退出\n  :wq         : 保存并退出\n  :vsp [文件] : 左右分屏\n  :sp [文件]  : 上下分屏\n  :tabnew     : 新标签页\n  :tree       : 开关文件树\n  :git        : 开关 Git 面板\n  :lang [en/zh]: 切换语言",
 		},
 	}
 
@@ -1159,6 +1199,8 @@ func (m Model) Init() tea.Cmd {
 		loadDirectoryCmd(m.fileTree.rootPath),
 		checkGitStatusCmd(),
 		loadPluginCmd(),
+		// 3. 启动 LSP 客户端
+		m.lsp.Start(),
 	}
 	
 	if len(m.tabs) > 0 && len(m.tabs[0].Panes) > 0 && m.tabs[0].Panes[0].Filename != "" {
@@ -1240,6 +1282,61 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	
 	switch msg := msg.(type) {
 	
+	// --- LSP 消息处理 ---
+	case LSPLogMsg:
+		m.statusMsg = string(msg)
+		// 如果 LSP 启动了，必须马上发送 initialize 请求
+		if strings.HasPrefix(string(msg), "LSP Started") {
+			cwd, _ := os.Getwd()
+			m.lsp.Send("initialize", InitializeParams{
+				ProcessID:    os.Getpid(),
+				RootURI:      PathToURI(cwd),
+				Capabilities: map[string]interface{}{
+					"textDocument": map[string]interface{}{
+						"completion": map[string]interface{}{
+							"completionItem": map[string]interface{}{
+								"snippetSupport": true,
+							},
+						},
+					},
+				},
+			})
+		}
+		return m, nil
+
+	case LSPResponseMsg:
+		// 处理 LSP 的回复
+		
+		// 如果是 Initialize 的回复
+		if !m.lspInit {
+			m.lsp.Notify("initialized", struct{}{})
+			m.lspInit = true
+			
+			// 🔥 重要：同步所有已经打开的文件 🔥
+			for _, tab := range m.tabs {
+				for _, pane := range tab.Panes {
+					if pane.Filename != "" {
+						pane.LSPVersion = 1
+						m.lsp.Notify("textDocument/didOpen", DidOpenTextDocumentParams{
+							TextDocument: TextDocumentItem{
+								URI:        PathToURI(pane.Filename),
+								LanguageID: DetectLanguageID(pane.Filename),
+								Version:    pane.LSPVersion,
+								Text:       strings.Join(pane.Lines, "\n"),
+							},
+						})
+					}
+				}
+			}
+			
+			m.statusMsg = "LSP Ready! 🚀 (Synced Open Files)"
+			return m, nil
+		}
+		
+		// LSP 响应（简化处理，不再使用 LSP 补全）
+		m.statusMsg = "LSP Response Received"
+		return m, nil
+	
 	// --- 异步加载完成的消息 ---
 	case fileLoadedMsg:
 		if msg.err != nil {
@@ -1268,6 +1365,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.cachedFormatter == nil {
 				m.cachedFormatter = formatters.TTY256
+			}
+
+			// LSP：同步文件打开状态
+			if m.lspInit {
+				currPane.LSPVersion = 1
+				m.lsp.Notify("textDocument/didOpen", DidOpenTextDocumentParams{
+					TextDocument: TextDocumentItem{
+						URI:        PathToURI(msg.filename),
+						LanguageID: DetectLanguageID(msg.filename),
+						Version:    currPane.LSPVersion,
+						Text:       strings.Join(msg.content, "\n"),
+					},
+				})
 			}
 		}
 		return m, nil
@@ -2191,6 +2301,21 @@ func (m Model) handleWhichKeyMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.language == LangEN { m.language = LangZH } else { m.language = LangEN }
 		m.statusMsg = fmt.Sprintf(m.tr("msg.lang_set"), m.language)
 		m.mode = NormalMode
+		m.syncSizes() // ✅ 修复：切换语言后重新计算布局
+		return m, nil
+
+	case "c":
+		// Toggle Completion Feature (开关补全功能)
+		m.mode = NormalMode
+		m.syncSizes()
+		m.completionEnabled = !m.completionEnabled
+		if m.completionEnabled {
+			m.statusMsg = "✓ 补全功能已启用"
+		} else {
+			m.showCompletion = false
+			m.completions = nil
+			m.statusMsg = "✖ 补全功能已禁用"
+		}
 		return m, nil
 
 	case "?":
@@ -2704,8 +2829,18 @@ func (m Model) handleInsertMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	curTab := m.tabs[m.activeTab]
 	currPane := curTab.Panes[curTab.ActivePane]
 
+	// 获取当前行内容
+	line := currPane.Lines[currPane.CursorY]
+	runes := []rune(line)
+	pos := currPane.CursorX
+
 	switch msg.Type {
 	case tea.KeyEsc:
+		if m.showCompletion {
+			m.showCompletion = false
+			m.completions = nil
+			return m, nil
+		}
 		// 退出插入模式
 		m.mode = NormalMode
 		m.statusMsg = "回到普通模式"
@@ -2715,16 +2850,56 @@ func (m Model) handleInsertMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyEnter:
-		// 插入新行
-		m.insertNewLine(currPane)
+		if m.showCompletion && len(m.completions) > 0 {
+			m.acceptCompletion(currPane)
+			return m, nil
+		}
+		// ✅ Smart Indent：智能缩进
+		m.insertNewLineWithIndent(currPane)
+		return m, nil
+
+	case tea.KeyTab:
+		// Tab 也可以接受补全
+		if m.showCompletion && len(m.completions) > 0 {
+			m.acceptCompletion(currPane)
+			return m, nil
+		}
+		// 否则插入 4 个空格
+		for i := 0; i < 4; i++ {
+			m.insertChar(currPane, ' ')
+		}
+		return m, nil
 
 	case tea.KeyBackspace:
-		// 删除字符
+		// ✅ Auto Pairs：成对删除
+		if pos > 0 && pos < len(runes) {
+			left := runes[pos-1]
+			right := runes[pos]
+			// 检查是否是一对括号/引号
+			isPair := (left == '{' && right == '}') ||
+				(left == '[' && right == ']') ||
+				(left == '(' && right == ')') ||
+				(left == '"' && right == '"') ||
+				(left == '\'' && right == '\'') ||
+				(left == '`' && right == '`')
+
+			if isPair {
+				// 同时删除左右两个字符
+				newRunes := append(runes[:pos-1], runes[pos+1:]...)
+				currPane.Lines[currPane.CursorY] = string(newRunes)
+				currPane.CursorX--
+				m.showCompletion = false
+				return m, nil
+			}
+		}
+		// 普通删除
 		m.deleteChar(currPane)
+		m.showCompletion = false
 
 	case tea.KeySpace:
 		// 插入空格
 		m.insertChar(currPane, ' ')
+		m.showCompletion = false
 	
 	case tea.KeyCtrlV:
 		// 粘贴 (从系统剪贴板)
@@ -2736,7 +2911,11 @@ func (m Model) handleInsertMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "✓ 已粘贴"
 		}
 
-	case tea.KeyUp:
+	case tea.KeyUp, tea.KeyCtrlK:
+		if m.showCompletion && len(m.completions) > 0 {
+			m.completionIdx = (m.completionIdx - 1 + len(m.completions)) % len(m.completions)
+			return m, nil
+		}
 		// 向上移动光标
 		if currPane.CursorY > 0 {
 			currPane.CursorY--
@@ -2748,7 +2927,11 @@ func (m Model) handleInsertMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			currPane.Viewport.SetYOffset(currPane.CursorY)
 		}
 
-	case tea.KeyDown:
+	case tea.KeyDown, tea.KeyCtrlJ:
+		if m.showCompletion && len(m.completions) > 0 {
+			m.completionIdx = (m.completionIdx + 1) % len(m.completions)
+			return m, nil
+		}
 		// 向下移动光标
 		if currPane.CursorY < len(currPane.Lines)-1 {
 			currPane.CursorY++
@@ -2780,30 +2963,49 @@ func (m Model) handleInsertMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			currPane.CursorX = 0
 		}
 
-	case tea.KeyTab:
-		// 如果有 AI 建议，按 Tab 接受建议
-		if m.suggestion != "" {
-			// 将建议的字符串逐个字符插入
-			for _, ch := range m.suggestion {
-				m.insertChar(currPane, ch)
-			}
-			m.suggestion = ""
-			m.statusMsg = "✓ 已接受 AI 建议"
-			return m, nil
-		}
-
-		// 否则插入制表符（4个空格）
-		for i := 0; i < 4; i++ {
-			m.insertChar(currPane, ' ')
-		}
-
 	default:
-		// 插入普通字符
-		if len(msg.String()) == 1 {
-			m.insertChar(currPane, rune(msg.String()[0]))
+		// 处理普通字符输入
+		char := msg.String()
+		if char != "" && len(char) == 1 {
+			ch := rune(char[0])
+			
+			// ✅ Auto Pairs：自动成对括号/引号
+			pairs := map[rune]rune{
+				'{': '}', '[': ']', '(': ')', '"': '"', '\'': '\'', '`': '`',
+			}
+			
+			if closer, isPairStart := pairs[ch]; isPairStart {
+				// 插入成对字符：左 + 右
+				newRunes := make([]rune, 0, len(runes)+2)
+				newRunes = append(newRunes, runes[:pos]...)
+				newRunes = append(newRunes, ch, closer)
+				newRunes = append(newRunes, runes[pos:]...)
+				currPane.Lines[currPane.CursorY] = string(newRunes)
+				currPane.CursorX++ // 光标在中间
+				m.triggerCompletion(currPane)
+				return m, nil
+			}
+			
+			// ✅ Auto Pairs：智能跳过闭合符号
+			closers := map[rune]bool{'}': true, ']': true, ')': true, '"': true, '\'': true, '`': true}
+			if closers[ch] && pos < len(runes) && runes[pos] == ch {
+				// 右边已经是这个符号，直接跳过
+				currPane.CursorX++
+				return m, nil
+			}
+			
+			// 普通字符插入
+			m.insertChar(currPane, ch)
+			
+			// 自动触发补全
+			if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+				(ch >= '0' && ch <= '9') || ch == '_' || ch == '.' {
+				m.triggerCompletion(currPane)
+			} else {
+				m.showCompletion = false
+			}
 		}
 	}
-
 	return m, nil
 }
 
@@ -2832,6 +3034,103 @@ func (m *Model) insertChar(p *EditorPane, ch rune) {
 }
 
 // ... pasteToPane, insertNewLine, deleteChar are already updated ...
+
+// triggerCompletion 触发补全菜单
+func (m *Model) triggerCompletion(p *EditorPane) {
+	// 检查补全功能是否启用
+	if !m.completionEnabled {
+		m.showCompletion = false
+		return
+	}
+	
+	// 获取光标前的文本作为前缀
+	line := p.Lines[p.CursorY]
+	runes := []rune(line)
+	if p.CursorX > len(runes) {
+		return
+	}
+	
+	// 从光标位置向前查找前缀（包括 . 之前的包名）
+	prefix := ""
+	start := p.CursorX - 1
+	for start >= 0 {
+		ch := runes[start]
+		if ch == '.' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' {
+			start--
+		} else {
+			break
+		}
+	}
+	start++
+	if start < p.CursorX {
+		prefix = string(runes[start:p.CursorX])
+	}
+	
+	// 如果包含 "." 则总是触发（成员补全）
+	// 否则至少需要2个字符才触发（避免太频繁）
+	hasDot := strings.Contains(prefix, ".")
+	if !hasDot && len(prefix) < 2 {
+		m.showCompletion = false
+		return
+	}
+	
+	// 检测语言
+	lang := DetectLanguageID(p.Filename)
+	
+	// 获取补全列表
+	items := GetCompletions(prefix, p.Lines, lang)
+	
+	if len(items) > 0 {
+		m.completions = items
+		m.showCompletion = true
+		m.completionIdx = 0
+		m.completionPrefix = prefix
+	} else {
+		m.showCompletion = false
+	}
+}
+
+// acceptCompletion 接受当前选中的补全项
+func (m *Model) acceptCompletion(p *EditorPane) {
+	if !m.showCompletion || len(m.completions) == 0 {
+		return
+	}
+	
+	item := m.completions[m.completionIdx]
+	
+	// 删除已输入的前缀（. 后面的部分）
+	prefixToRemove := m.completionPrefix
+	if idx := strings.LastIndex(prefixToRemove, "."); idx >= 0 {
+		prefixToRemove = prefixToRemove[idx+1:]
+	}
+	
+	// 删除前缀
+	for i := 0; i < len(prefixToRemove); i++ {
+		m.deleteCharBackward(p)
+	}
+	
+	// 插入补全文本
+	for _, ch := range item.InsertText {
+		m.insertChar(p, ch)
+	}
+	
+	// 关闭补全菜单
+	m.showCompletion = false
+	m.completions = nil
+	m.statusMsg = fmt.Sprintf("✅ Inserted: %s", item.Label)
+}
+
+// deleteCharBackward 删除光标前一个字符
+func (m *Model) deleteCharBackward(p *EditorPane) {
+	if p.CursorX > 0 {
+		line := p.Lines[p.CursorY]
+		runes := []rune(line)
+		if p.CursorX <= len(runes) {
+			p.Lines[p.CursorY] = string(append(runes[:p.CursorX-1], runes[p.CursorX:]...))
+			p.CursorX--
+		}
+	}
+}
 
 // callPlugin 调用 WASM 插件处理当前缓冲区
 func (m *Model) callPlugin(p *EditorPane) {
@@ -2943,6 +3242,83 @@ func (m *Model) insertNewLine(p *EditorPane) {
 	// 移动光标到新行开头
 	p.CursorY++
 	p.CursorX = 0
+}
+
+// insertNewLineWithIndent 智能缩进换行
+func (m *Model) insertNewLineWithIndent(p *EditorPane) {
+	line := p.Lines[p.CursorY]
+	runes := []rune(line)
+	pos := p.CursorX
+	if pos > len(runes) {
+		pos = len(runes)
+	}
+
+	// 1. 提取当前行的缩进（空格和 Tab）
+	currentIndent := ""
+	for _, ch := range runes {
+		if ch == ' ' || ch == '\t' {
+			currentIndent += string(ch)
+		} else {
+			break
+		}
+	}
+
+	// 2. 检查是否需要增加缩进（光标前是 { [ ( :）
+	extraIndent := ""
+	if pos > 0 {
+		lastChar := runes[pos-1]
+		if lastChar == '{' || lastChar == '[' || lastChar == '(' || lastChar == ':' {
+			extraIndent = "    " // 4 空格缩进
+		}
+	}
+
+	// 3. 检查是否是 "分裂模式"（Oreo Mode）：光标在 {} [] () 中间
+	isSplitBlock := false
+	if pos > 0 && pos < len(runes) {
+		prevChar := runes[pos-1]
+		nextChar := runes[pos]
+		isSplitBlock = (prevChar == '{' && nextChar == '}') ||
+			(prevChar == '[' && nextChar == ']') ||
+			(prevChar == '(' && nextChar == ')')
+	}
+
+	left := string(runes[:pos])
+	right := string(runes[pos:])
+
+	if isSplitBlock {
+		// 分裂模式：生成三行
+		// 第一行：{
+		// 第二行：    | (带缩进)
+		// 第三行：} (原缩进)
+		p.Lines[p.CursorY] = left
+		
+		// 插入两行
+		newLines := make([]string, len(p.Lines)+2)
+		copy(newLines[:p.CursorY+1], p.Lines[:p.CursorY+1])
+		newLines[p.CursorY+1] = currentIndent + extraIndent // 中间行（光标位置）
+		newLines[p.CursorY+2] = currentIndent + right       // 闭合括号行
+		copy(newLines[p.CursorY+3:], p.Lines[p.CursorY+1:])
+		p.Lines = newLines
+
+		// 光标移到中间行的缩进末尾
+		p.CursorY++
+		p.CursorX = len(currentIndent) + len(extraIndent)
+	} else {
+		// 普通换行：继承缩进 + 额外缩进
+		p.Lines[p.CursorY] = left
+		
+		newLine := currentIndent + extraIndent + strings.TrimLeft(right, " \t")
+		
+		newLines := make([]string, len(p.Lines)+1)
+		copy(newLines[:p.CursorY+1], p.Lines[:p.CursorY+1])
+		newLines[p.CursorY+1] = newLine
+		copy(newLines[p.CursorY+2:], p.Lines[p.CursorY+1:])
+		p.Lines = newLines
+
+		// 光标移到新行的缩进末尾
+		p.CursorY++
+		p.CursorX = len(currentIndent) + len(extraIndent)
+	}
 }
 
 // deleteChar 删除光标前的字符 (UTF-8 safe, 不会产生乱码)
@@ -3144,6 +3520,7 @@ func (m *Model) syncSizes() {
 	} else {
 		// Normal mode has a status bar
 		availableHeight -= StatusBarHeight
+		// 补全菜单作为覆盖层，不改变主内容高度
 	}
 
 
@@ -3326,6 +3703,24 @@ func (m Model) View() string {
 	// 1. 原子化计算布局尺寸
 	sidebarWidth, editorWidth, sidebarHeight, editorHeight := m.calculateSizes()
 
+	// 预先计算补全菜单高度，从编辑器底部减去（保持顶部不动）
+	completionMenuHeight := 0
+	if m.showCompletion && len(m.completions) > 0 {
+		maxItems := 5
+		if len(m.completions) < maxItems {
+			maxItems = len(m.completions)
+		}
+		completionMenuHeight = maxItems + 2 // 菜单项 + 边框
+		editorHeight -= completionMenuHeight
+		sidebarHeight -= completionMenuHeight
+		if editorHeight < 5 {
+			editorHeight = 5
+		}
+		if sidebarHeight < 5 {
+			sidebarHeight = 5
+		}
+	}
+
 	// 2. 渲染侧边栏 (如果可见)
 	var leftPanel string
 	if sidebarWidth > 0 {
@@ -3380,6 +3775,87 @@ func (m Model) View() string {
 	// 5. Main Content Assembly
 	mainContent := lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, editorView)
 
+	// ---------------------------------------------------------
+	// 🚀 补全菜单 (Docked Panel - 底部停靠方案)
+	// ---------------------------------------------------------
+	var completionPanel string
+	if m.showCompletion && len(m.completions) > 0 {
+		// 渲染补全菜单项
+		var menuLines []string
+		maxItems := 5
+		
+		// 滚动窗口逻辑：让选中项尽量在中间
+		displayList := m.completions
+		startIdx := 0
+		if len(displayList) > maxItems {
+			startIdx = m.completionIdx - 2
+			if startIdx < 0 {
+				startIdx = 0
+			}
+			endIdx := startIdx + maxItems
+			if endIdx > len(displayList) {
+				endIdx = len(displayList)
+				startIdx = endIdx - maxItems
+				if startIdx < 0 {
+					startIdx = 0
+				}
+			}
+			displayList = displayList[startIdx : startIdx+maxItems]
+			if len(displayList) > maxItems {
+				displayList = displayList[:maxItems]
+			}
+		}
+
+		for i, item := range displayList {
+			// 计算实际索引用于高亮判断
+			realIdx := startIdx + i
+			
+			// 图标
+			kindIcon := "  "
+			switch item.Kind {
+			case "func":
+				kindIcon = "ƒ "
+			case "keyword":
+				kindIcon = "▷ "
+			case "snippet":
+				kindIcon = "✪ "
+			case "variable":
+				kindIcon = "χ "
+			case "module":
+				kindIcon = "□ "
+			case "struct":
+				kindIcon = "◈ "
+			}
+
+			// 样式 - 无背景色
+			prefix := "  "
+			style := lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+
+			if realIdx == m.completionIdx {
+				prefix = "▶ "
+				style = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("214")). // 橙色高亮
+					Bold(true)
+			}
+
+			// 格式化行
+			label := item.Label
+			if len(label) > 25 {
+				label = label[:22] + "..."
+			}
+			lineContent := fmt.Sprintf("%s%s%-25s", prefix, kindIcon, label)
+			menuLines = append(menuLines, style.Render(lineContent))
+		}
+
+		// 组合菜单 View，加完整边框
+		menuContent := lipgloss.JoinVertical(lipgloss.Left, menuLines...)
+		completionPanel = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()). // 完整圆角边框
+			BorderForeground(lipgloss.Color("62")).
+			Width(m.width - 4).
+			Render(menuContent)
+	}
+
 	// 6. 渲染底部区域 (Menu or Status Bar or Command Input)
 	var bottom string
 	if m.mode == WhichKeyMode {
@@ -3401,12 +3877,11 @@ func (m Model) View() string {
 		bottom = m.renderStatusBar()
 	}
 
-	// Construct Final View
-	// Normal: Tabs + Content + Status
-	mainView := lipgloss.JoinVertical(lipgloss.Left, header, mainContent, bottom) 
-
-	// 8. Full-Frame Lock
-	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, mainView)
+	// 7. 最终组装：Header + Content + [补全菜单] + StatusBar
+	if completionPanel != "" {
+		return lipgloss.JoinVertical(lipgloss.Left, header, mainContent, completionPanel, bottom)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, header, mainContent, bottom)
 }
 
 // viewWhichKey 渲染 WhichKey 菜单 (LazyVim-style Leader Key Menu)
@@ -3447,12 +3922,13 @@ func (m Model) viewWhichKey() string {
 		colStyle.Render(col1),
 		colStyle.Render(col2))
 
-	// Container
+	// Container with explicit height
 	containerStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("62")).
 		Padding(1, 2).
-		Width(m.width - 4)
+		Width(m.width - 4).
+		Height(WhichKeyHeight - 2) // ✅ 修复：强制高度确保边框显示
 
 	title := titleStyle.Render("⌨ WhichKey Menu  (Space/Esc to close)")
 	content := fmt.Sprintf("%s\n\n%s", title, body)
@@ -4154,15 +4630,26 @@ func (m Model) renderStatusBar() string {
 // =============================================================================
 
 func main() {
+	// 创建初始模型
+	initModel := initialModel()
+	
 	// 创建 Bubble Tea 程序
 	p := tea.NewProgram(
-		initialModel(),
+		initModel,
 		tea.WithAltScreen(), // 使用备用屏幕（退出时恢复原终端内容）
 	)
+	
+	// 设置全局 Program，让 LSP 协程能发消息回来
+	globalProgram = p
 
 	// 运行程序
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 		os.Exit(1)
+	}
+	
+	// 清理 LSP 客户端
+	if initModel.lsp != nil {
+		initModel.lsp.Stop()
 	}
 }
