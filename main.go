@@ -3388,12 +3388,14 @@ func (m Model) View() string {
 		style := lipgloss.NewStyle().Height(WhichKeyHeight).MaxHeight(WhichKeyHeight)
 		bottom = style.Render(m.viewWhichKey())
 	} else if m.mode == CommandMode || m.mode == ModeGitCommit {
-		// Command Input Bar (Vim Style)
-		style := lipgloss.NewStyle().
-			Width(m.width).
-			Background(lipgloss.Color("235")). // Dark gray
-			Foreground(lipgloss.Color("255"))  // White text
-		bottom = style.Render(m.commandInput.View())
+		// Command Input Bar (Vim Style) - 不使用 Background 避免光标闪烁时背景也闪
+		inputView := m.commandInput.View()
+		// 填充到整行宽度
+		padding := m.width - lipgloss.Width(inputView)
+		if padding > 0 {
+			inputView = inputView + strings.Repeat(" ", padding)
+		}
+		bottom = inputView
 	} else {
 		// Normal Status Bar (Powerline)
 		bottom = m.renderStatusBar()
@@ -3589,11 +3591,14 @@ func renderWindow(content string, title string, isActive bool, width, height int
 		}
 		
 		lineWidth := lipgloss.Width(line)
+		if lineWidth > innerWidth {
+			// 先截断
+			line = truncateToWidth(line, innerWidth)
+			lineWidth = lipgloss.Width(line)
+		}
+		// 不管是否截断，都要填充到精确宽度
 		if lineWidth < innerWidth {
 			line = line + strings.Repeat(" ", innerWidth-lineWidth)
-		} else if lineWidth > innerWidth {
-			// Manual Truncation via Binary Search to preserve ANSI and content
-			line = truncateToWidth(line, innerWidth)
 		}
 		paddedLines = append(paddedLines, line)
 	}
