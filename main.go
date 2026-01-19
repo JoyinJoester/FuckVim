@@ -34,6 +34,7 @@ import (
 	"github.com/alecthomas/chroma/v2/styles"
 
 	"github.com/charmbracelet/bubbles/viewport"
+	"github.com/mattn/go-runewidth"
 )
 
 // =============================================================================
@@ -52,10 +53,11 @@ const (
 type Mode int
 
 const (
-	NormalMode   Mode = iota // 普通模式 - 浏览和导航
-	InsertMode               // 插入模式 - 输入文本
-	CommandMode              // 命令模式 - 输入 Ex 命令 (:q, :w, etc.)
-	FileTreeMode             // 文件树模式 - 浏览文件系统
+	NormalMode    Mode = iota // 普通模式 - 浏览和导航
+	InsertMode                // 插入模式 - 输入文本
+	CommandMode               // 命令模式 - 输入 Ex 命令 (:q, :w, etc.)
+	FileTreeMode              // 文件树模式 - 浏览文件系统
+	FuzzyFindMode             // 模糊搜索模式 - Telescope-style finder
 )
 
 func (m Mode) String() string {
@@ -68,6 +70,8 @@ func (m Mode) String() string {
 		return "COMMAND"
 	case FileTreeMode:
 		return "TREE"
+	case FuzzyFindMode:
+		return "FINDER"
 	default:
 		return "UNKNOWN"
 	}
@@ -332,6 +336,20 @@ type Model struct {
 	// 异步任务通道
 	// ----------------------------------------------------
 	pushChan chan string // Git Push 实时输出通道
+
+	// ----------------------------------------------------
+	// Fuzzy Finder (Telescope-style) - Input + List Architecture
+	// ----------------------------------------------------
+	finderInput  textinput.Model // The typing area
+	allFiles     []finderItem    // Cache of ALL files (to filter against)
+	filteredFiles []finderItem   // Filtered results
+	finderCursor int             // Cursor position in filtered list
+	finderRoot   string          // Root directory for finder
+
+	// ----------------------------------------------------
+	// Editor Preferences
+	// ----------------------------------------------------
+	relativeLineNumbers bool // true = Hybrid Vim-style, false = Absolute standard
 }
 
 // =============================================================================
@@ -467,6 +485,46 @@ type pluginLoadedMsg struct {
 	err    error
 }
 
+// -----------------------------------------------------------------------------
+// Fuzzy Finder Types and Commands
+// -----------------------------------------------------------------------------
+
+// findFilesMsg 模糊搜索文件结果
+type findFilesMsg []finderItem
+
+// finderItem 文件条目
+type finderItem struct {
+	path string
+	desc string
+}
+
+func (i finderItem) Title() string       { return i.path }
+func (i finderItem) Description() string { return i.desc }
+func (i finderItem) FilterValue() string { return i.path }
+
+// findFilesCmd 异步递归扫描目录
+func findFilesCmd(root string) tea.Cmd {
+	return func() tea.Msg {
+		var items []finderItem
+		filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			// Skip hidden directories
+			if info.IsDir() && strings.HasPrefix(info.Name(), ".") {
+				return filepath.SkipDir
+			}
+			if !info.IsDir() {
+				// Make path relative to root for cleaner display
+				relPath, _ := filepath.Rel(root, path)
+				items = append(items, finderItem{path: relPath, desc: "File"})
+			}
+			return nil
+		})
+		return findFilesMsg(items)
+	}
+}
+
 // loadFileCmd 异步加载文件
 func loadFileCmd(filename string) tea.Cmd {
 	return func() tea.Msg {
@@ -480,6 +538,11 @@ func loadFileCmd(filename string) tea.Cmd {
 		text := string(content)
 		text = strings.ReplaceAll(text, "\r\n", "\n")
 		text = strings.ReplaceAll(text, "\r", "\n")
+
+		// Visual Sanitization: Expand tabs to 4 spaces for consistent rendering
+		// This prevents layout explosion and provides consistent alignment
+		text = strings.ReplaceAll(text, "\t", "    ")
+
 		lines := strings.Split(text, "\n")
 		if len(lines) == 0 {
 			lines = []string{""}
@@ -658,6 +721,30 @@ func (m *Model) savePane(p *EditorPane) error {
 	}
 
 	content := strings.Join(p.Lines, "\n")
+
+	// Intelligent Saver: Makefile Tab Restoration
+	// Makefiles REQUIRE hard tabs for recipe lines
+	// Convert leading 4-space indentation back to tabs
+	baseName := filepath.Base(p.Filename)
+	if baseName == "Makefile" || baseName == "makefile" ||
+		baseName == "GNUmakefile" || strings.HasSuffix(baseName, ".mk") {
+		// Convert leading 4-spaces to tabs for each line
+		lines := strings.Split(content, "\n")
+		for i, line := range lines {
+			// Count leading 4-space groups and convert to tabs
+			originalLen := len(line)
+			trimmed := strings.TrimLeft(line, " ")
+			leadingSpaces := originalLen - len(trimmed)
+			tabCount := leadingSpaces / 4
+			remainingSpaces := leadingSpaces % 4
+
+			if tabCount > 0 {
+				lines[i] = strings.Repeat("\t", tabCount) + strings.Repeat(" ", remainingSpaces) + trimmed
+			}
+		}
+		content = strings.Join(lines, "\n")
+	}
+
 	err := os.WriteFile(p.Filename, []byte(content), 0644)
 	if err != nil {
 		return err
@@ -795,6 +882,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.plugin = msg.plugin
 		}
+		return m, nil
+
+	case findFilesMsg:
+		// Files loaded, store and apply initial filter
+		m.allFiles = msg
+		m.filteredFiles = msg // Initially show all
+		m.finderCursor = 0
+		m.statusMsg = fmt.Sprintf("🔍 Found %d files", len(msg))
 		return m, nil
 
 	case tea.WindowSizeMsg:
@@ -1022,6 +1117,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
             return m.handleInsertMode(msg)
         case CommandMode:
             return m.handleCommandMode(msg)
+        case FuzzyFindMode:
+            return m.handleFuzzyFindMode(msg)
         }
     }
 
@@ -1112,6 +1209,27 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.pasteToPane(currPane, text)
 			m.statusMsg = "✓ 已粘贴"
 		}
+
+	case "ctrl+p":
+		// 模糊文件搜索 (Telescope-style finder)
+		m.mode = FuzzyFindMode
+		m.finderRoot = m.fileTree.rootPath
+
+		// Initialize textinput for typing
+		ti := textinput.New()
+		ti.Placeholder = "Type to search..."
+		ti.Focus()
+		ti.CharLimit = 256
+		ti.Width = 50
+		m.finderInput = ti
+
+		// Clear previous state
+		m.allFiles = nil
+		m.filteredFiles = nil
+		m.finderCursor = 0
+
+		m.statusMsg = "Scanning files..."
+		return m, findFilesCmd(m.finderRoot)
 	}
 
 	return m, nil
@@ -1324,6 +1442,75 @@ func (m Model) handleCommandMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleFuzzyFindMode 处理模糊搜索模式下的按键
+func (m Model) handleFuzzyFindMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		// Close finder, return to normal
+		m.mode = NormalMode
+		m.finderInput.Blur()
+		m.statusMsg = "Finder closed"
+		return m, nil
+
+	case tea.KeyEnter:
+		// Open selected file
+		if len(m.filteredFiles) > 0 && m.finderCursor < len(m.filteredFiles) {
+			item := m.filteredFiles[m.finderCursor]
+			fullPath := filepath.Join(m.finderRoot, item.path)
+
+			// Load file into active pane
+			m.panes[m.activePane].Filename = fullPath
+			m.mode = NormalMode
+			m.finderInput.Blur()
+			m.focus = FocusEditor
+			m.statusMsg = fmt.Sprintf("Opening: %s", item.path)
+			return m, loadFileCmd(fullPath)
+		}
+		m.mode = NormalMode
+		m.finderInput.Blur()
+		return m, nil
+
+	case tea.KeyUp, tea.KeyCtrlK:
+		// Move cursor up
+		if m.finderCursor > 0 {
+			m.finderCursor--
+		}
+		return m, nil
+
+	case tea.KeyDown, tea.KeyCtrlJ:
+		// Move cursor down
+		if m.finderCursor < len(m.filteredFiles)-1 {
+			m.finderCursor++
+		}
+		return m, nil
+	}
+
+	// Pass to textinput for typing
+	var cmd tea.Cmd
+	m.finderInput, cmd = m.finderInput.Update(msg)
+
+	// Apply fuzzy filter based on input value
+	query := strings.ToLower(m.finderInput.Value())
+	if query == "" {
+		m.filteredFiles = m.allFiles
+	} else {
+		var filtered []finderItem
+		for _, item := range m.allFiles {
+			if strings.Contains(strings.ToLower(item.path), query) {
+				filtered = append(filtered, item)
+			}
+		}
+		m.filteredFiles = filtered
+	}
+
+	// Reset cursor if out of bounds
+	if m.finderCursor >= len(m.filteredFiles) {
+		m.finderCursor = 0
+	}
+
+	return m, cmd
+}
+
 // executeCommand 执行 Ex 命令
 func (m *Model) executeCommand() tea.Cmd {
 	cmd := strings.TrimSpace(m.commandBuffer)
@@ -1471,6 +1658,15 @@ func (m *Model) executeCommand() tea.Cmd {
 			return m.forceRefresh()
 		}
 
+	case "toggle-nu", "tn":
+		// 切换行号显示模式 (相对/绝对)
+		m.relativeLineNumbers = !m.relativeLineNumbers
+		modeName := "Absolute (1, 2, 3...)"
+		if m.relativeLineNumbers {
+			modeName = "Relative (Vim Hybrid)"
+		}
+		m.statusMsg = "📐 Line Numbers: " + modeName
+		return nil
 	case "ai":
 		m.statusMsg = "⚛ AI 聊天功能即将推出..."
 
@@ -1539,8 +1735,8 @@ func (m Model) handleFileTreeMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// INPUT MODE: Typing a filename (for Create or Rename)
 	// =========================================================================
 	case TreeInput:
-		switch msg.Type {
-		case tea.KeyEsc:
+		switch msg.String() {
+		case "esc":
 			// Cancel input
 			m.fileTree.State = TreeNormal
 			m.fileTree.Action = ActionNone
@@ -1548,7 +1744,7 @@ func (m Model) handleFileTreeMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "已取消"
 			return m, nil
 			
-		case tea.KeyEnter:
+		case "enter":
 			// Execute action
 			name := m.fileTree.Input.Value()
 			if name == "" {
@@ -1859,11 +2055,23 @@ func (m Model) handleInsertMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // 文本编辑操作
 // =============================================================================
 
-// insertChar 在光标位置插入字符
+// insertChar 在光标位置插入字符 (UTF-8 safe)
 func (m *Model) insertChar(p *EditorPane, ch rune) {
 	line := p.Lines[p.CursorY]
-	newLine := line[:p.CursorX] + string(ch) + line[p.CursorX:]
-	p.Lines[p.CursorY] = newLine
+	runes := []rune(line)
+
+	// Ensure cursor doesn't exceed line length
+	if p.CursorX > len(runes) {
+		p.CursorX = len(runes)
+	}
+
+	// Insert the rune at cursor position
+	newRunes := make([]rune, 0, len(runes)+1)
+	newRunes = append(newRunes, runes[:p.CursorX]...)
+	newRunes = append(newRunes, ch)
+	newRunes = append(newRunes, runes[p.CursorX:]...)
+
+	p.Lines[p.CursorY] = string(newRunes)
 	p.CursorX++
 }
 
@@ -1981,18 +2189,31 @@ func (m *Model) insertNewLine(p *EditorPane) {
 	p.CursorX = 0
 }
 
-// deleteChar 删除光标前的字符
+// deleteChar 删除光标前的字符 (UTF-8 safe, 不会产生乱码)
 func (m *Model) deleteChar(p *EditorPane) {
 	if p.CursorX > 0 {
-		// 删除当前行中的字符
+		// 使用 rune 切片删除字符（正确处理中文等多字节字符）
 		line := p.Lines[p.CursorY]
-		p.Lines[p.CursorY] = line[:p.CursorX-1] + line[p.CursorX:]
+		runes := []rune(line)
+
+		// Ensure cursor doesn't exceed line length
+		if p.CursorX > len(runes) {
+			p.CursorX = len(runes)
+		}
+
+		// Delete the rune before cursor
+		newRunes := make([]rune, 0, len(runes)-1)
+		newRunes = append(newRunes, runes[:p.CursorX-1]...)
+		newRunes = append(newRunes, runes[p.CursorX:]...)
+
+		p.Lines[p.CursorY] = string(newRunes)
 		p.CursorX--
 	} else if p.CursorY > 0 {
 		// 合并到上一行
 		prevLine := p.Lines[p.CursorY-1]
 		currLine := p.Lines[p.CursorY]
-		p.CursorX = len(prevLine)
+		// 光标位置是上一行的 rune 长度
+		p.CursorX = len([]rune(prevLine))
 		p.Lines[p.CursorY-1] = prevLine + currLine
 
 		// 删除当前行
@@ -2000,6 +2221,9 @@ func (m *Model) deleteChar(p *EditorPane) {
 		p.CursorY--
 	}
 }
+
+// Suppress unused import warning for runewidth (used elsewhere)
+var _ = runewidth.StringWidth
 
 // =============================================================================
 // WASM 插件调用
@@ -2238,6 +2462,11 @@ func (m Model) View() string {
 		return "窗口太小，请调整尺寸 (Window too small)"
 	}
 
+	// Handle Fuzzy Find modal FIRST (overlay)
+	if m.mode == FuzzyFindMode {
+		return m.renderFuzzyFinder()
+	}
+
 	// 1. 原子化计算布局尺寸
 	sidebarWidth, editorWidth, sidebarHeight, editorHeight := m.calculateSizes()
 
@@ -2305,6 +2534,102 @@ func (m Model) View() string {
 	// 7. Full-Frame Lock: 强制最终输出为精确尺寸
 	// 这保证每次渲染的字符串结构完全一致，终端可以正确地原地覆盖像素
 	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, frame)
+}
+
+// renderFuzzyFinder 渲染模糊搜索弹窗
+func (m Model) renderFuzzyFinder() string {
+	// Calculate centered popup size
+	popupW := m.width * 6 / 10
+	popupH := m.height * 6 / 10
+	if popupW < 40 {
+		popupW = 40
+	}
+	if popupH < 10 {
+		popupH = 10
+	}
+
+	// Build content: Title + Input + List
+	var content strings.Builder
+
+	// Title
+	titleStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("205")).
+		Bold(true)
+	content.WriteString(titleStyle.Render("🔍 Fuzzy Find Files"))
+	content.WriteString("\n\n")
+
+	// Input field
+	inputStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(0, 1).
+		Width(popupW - 8)
+	content.WriteString(inputStyle.Render(m.finderInput.View()))
+	content.WriteString("\n\n")
+
+	// Filtered results list
+	listHeight := popupH - 10 // Reserve space for title, input, borders
+	if listHeight < 3 {
+		listHeight = 3
+	}
+
+	selectedStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("62")).
+		Foreground(lipgloss.Color("230")).
+		Bold(true)
+
+	normalStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("252"))
+
+	// Render visible items
+	startIdx := 0
+	if m.finderCursor >= listHeight {
+		startIdx = m.finderCursor - listHeight + 1
+	}
+
+	for i := startIdx; i < len(m.filteredFiles) && i < startIdx+listHeight; i++ {
+		item := m.filteredFiles[i]
+		line := item.path
+		if len(line) > popupW-10 {
+			line = line[:popupW-13] + "..."
+		}
+
+		if i == m.finderCursor {
+			content.WriteString("▸ " + selectedStyle.Render(line))
+		} else {
+			content.WriteString("  " + normalStyle.Render(line))
+		}
+		content.WriteString("\n")
+	}
+
+	// Fill empty lines if fewer items
+	for i := len(m.filteredFiles); i < listHeight; i++ {
+		content.WriteString("\n")
+	}
+
+	// Footer with count
+	countStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	content.WriteString("\n")
+	content.WriteString(countStyle.Render(fmt.Sprintf("%d/%d files", len(m.filteredFiles), len(m.allFiles))))
+
+	// Style the popup
+	popupStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(1, 2).
+		Width(popupW).
+		Height(popupH)
+
+	popupContent := popupStyle.Render(content.String())
+
+	// Center on screen with dimmed background
+	return lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		popupContent,
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceForeground(lipgloss.Color("237")),
+	)
 }
 
 // renderWindow 渲染通用带边框窗口
@@ -2472,23 +2797,54 @@ func (m Model) renderPane(p *EditorPane, width, height int, isActive bool) strin
 
 	for lineIdx := startLine; lineIdx < endLine; lineIdx++ {
 		rawLine := p.Lines[lineIdx]
-		
-		// Line number styling (right-aligned, 4 chars wide)
-		lineNumStr := fmt.Sprintf("%4d", lineIdx+1)
+
+		// =============================================
+		// Line Number Display (toggleable via :toggle-nu)
+		// - Relative mode: current = absolute, others = distance
+		// - Absolute mode: all lines show absolute numbers
+		// =============================================
+		isCursorLine := isActive && lineIdx == p.CursorY
+		var lineNumStr string
+
+		if m.relativeLineNumbers {
+			// Hybrid Relative Mode (Vim-style)
+			if isCursorLine {
+				// Current line: show absolute line number
+				lineNumStr = fmt.Sprintf("%4d", lineIdx+1)
+			} else {
+				// Other lines: show relative distance
+				relDist := lineIdx - p.CursorY
+				if relDist < 0 {
+					relDist = -relDist
+				}
+				lineNumStr = fmt.Sprintf("%4d", relDist)
+			}
+		} else {
+			// Absolute Mode (Standard)
+			lineNumStr = fmt.Sprintf("%4d", lineIdx+1)
+		}
+
+		// Line number styling
 		lineNumStyleToUse := lineNumberStyle
-		if isActive && lineIdx == p.CursorY {
-			lineNumStyleToUse = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
+		if isCursorLine {
+			lineNumStyleToUse = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("220")). // Gold for current line
+				Bold(true).
+				Width(4).
+				Align(lipgloss.Right)
 		}
 		lineNumStyled := lineNumStyleToUse.Render(lineNumStr)
-		
+
 		var lineContent string
-		
-		// Cursor line: render with cursor, no syntax highlight
-		if isActive && lineIdx == p.CursorY {
+
+		// Cursor line: render with cursor block, cursor line has subtle background
+		if isCursorLine {
 			runes := []rune(rawLine)
 			cx := p.CursorX
-			if cx > len(runes) { cx = len(runes) }
-			
+			if cx > len(runes) {
+				cx = len(runes)
+			}
+
 			if cx == len(runes) {
 				// Cursor at EOL
 				lineContent = string(runes) + "\x1b[7m \x1b[0m"
@@ -2510,7 +2866,7 @@ func (m Model) renderPane(p *EditorPane, width, height int, isActive bool) strin
 				lineContent = rawLine
 			}
 		}
-		
+
 		lines = append(lines, fmt.Sprintf("%s │ %s", lineNumStyled, lineContent))
 	}
 	
@@ -2531,11 +2887,11 @@ func (m Model) renderPane(p *EditorPane, width, height int, isActive bool) strin
 func (m Model) renderSidebar(width, height int) string {
 	var lines []string
 
-	// 内容高度 (reserve 2 for border, 2 for input/confirm if active)
+	// 内容高度 (reserve 2 for border, 3 for input/confirm if active - border needs 3 lines)
 	contentHeight := height - 2
 	inputAreaHeight := 0
 	if m.fileTree.State == TreeInput || m.fileTree.State == TreeConfirmDelete {
-		inputAreaHeight = 2
+		inputAreaHeight = 3 // top border + content + bottom border
 	}
 	visibleHeight := contentHeight - inputAreaHeight
 	if visibleHeight < 0 { visibleHeight = 0 }
