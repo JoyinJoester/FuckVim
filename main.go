@@ -180,6 +180,7 @@ const (
 	FuzzyFindMode             // 模糊搜索模式 - Telescope-style finder
 	WhichKeyMode              // WhichKey 菜单模式 - 显示可用快捷键
 	HelpMode                  // ? 帮助文档模式
+	ModeGitCommit             // Git Commit Message Input
 )
 
 func (m Mode) String() string {
@@ -272,8 +273,8 @@ type Focus int
 const (
 	FocusEditor   Focus = iota // 编辑器获得焦点
 	FocusFileTree              // 文件树获得焦点
-	FocusGit                   // Git 面板获得焦点
-	FocusCommand               // 命令行获得焦点
+	FocusGit        // 焦点在 Git Dashboard
+	FocusCommand    // 焦点在 Command Mode 
 )
 
 // GitStatus 表示文件状态
@@ -436,6 +437,8 @@ type Tab struct {
 }
 
 // Model 是 Bubble Tea 的核心状态结构
+type terminalFinishedMsg struct{ err error }
+
 type Model struct {
 	// 多标签页系统 (Vim-style Tabs)
 	tabs      []*Tab
@@ -509,6 +512,8 @@ type Model struct {
 	filteredFiles []finderItem   // Filtered results
 	finderCursor int             // Cursor position in filtered list
 	finderRoot   string          // Root directory for finder
+
+
 
 	// ----------------------------------------------------
 	// Help Viewport
@@ -587,6 +592,7 @@ func initialModel() Model {
 		mode:      NormalMode,
 		commandInput: ci,
 		helpViewport: vp,
+
 		statusMsg: "欢迎使用 FuckVim! 按 'i' 插入, :vsp 分屏, :q 退出",
 		width:     80,
 		height:    24,
@@ -667,6 +673,8 @@ func openTerminalCmd() tea.Cmd {
 		return terminalFinishedMsg{err}
 	})
 }
+
+
 
 // createPaneFromFile 创建新窗格 (如果文件不存在则为空缓冲)
 // sanitizeContent cleanses file content to prevent layout issues
@@ -830,7 +838,7 @@ type fileLoadedMsg struct {
 	err      error
 }
 
-type terminalFinishedMsg struct{ err error }
+
 
 type directoryLoadedMsg struct {
 	entries []FileEntry
@@ -1171,6 +1179,65 @@ func (m Model) Init() tea.Cmd {
 
 // Update 处理消息并更新模型
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	
+	// 🔥🔥🔥 独占模式：Git Commit 输入拦截器 🔥🔥🔥
+	// 一旦进入 GitCommit 模式，直接在这里拦截所有按键消息！
+	// 最高优先级，防止被全局快捷键逻辑抢走按键
+	if m.mode == ModeGitCommit {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "esc":
+				// 强制退出输入模式
+				m.mode = NormalMode
+				m.commandInput.Blur()
+				m.commandInput.Reset()
+				m.focus = FocusGit
+				m.statusMsg = "Commit aborted"
+				return m, nil
+			case "enter":
+				// 提交
+				val := m.commandInput.Value()
+				if val != "" {
+					err := m.runGitCommit(val)
+					if err != nil {
+						m.statusMsg = "Commit Error: " + err.Error()
+					} else {
+						m.statusMsg = "Committed: " + val
+					}
+				}
+				m.mode = NormalMode
+				m.commandInput.Blur()
+				m.commandInput.Reset()
+				m.focus = FocusGit
+				return m, checkGitStatusCmd()
+			case "ctrl+c":
+				// Ctrl+C 也取消
+				m.mode = NormalMode
+				m.commandInput.Blur()
+				m.commandInput.Reset()
+				m.focus = FocusGit
+				m.statusMsg = "Commit cancelled"
+				return m, nil
+			}
+			// 其他所有按键（包括 ctrl+h/j/k/l）都直接传给输入框
+			var cmd tea.Cmd
+			m.commandInput, cmd = m.commandInput.Update(msg)
+			return m, cmd
+		case tea.WindowSizeMsg:
+			// 窗口尺寸变化需要处理
+			m.width = msg.Width
+			m.height = msg.Height
+			m.syncSizes()
+			return m, nil
+		default:
+			// 其他消息（如光标闪烁）传给输入框
+			var cmd tea.Cmd
+			m.commandInput, cmd = m.commandInput.Update(msg)
+			return m, cmd
+		}
+	}
+	
 	switch msg := msg.(type) {
 	
 	// --- 异步加载完成的消息 ---
@@ -1325,21 +1392,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncSizes()
 		return m, tea.ClearScreen
 
+
+
 	case stageAllDoneMsg:
 		if msg.err != nil {
 			m.statusMsg = fmt.Sprintf("❌ Staging 失败: %v", msg.err)
 			return m, nil
 		}
-		// Staging 成功，进入提交模式
-		m.mode = CommandMode
-		m.commandBuffer = "commit "
-		m.statusMsg = "🚀 已暂存(0s)! 请输入提交信息:"
+		// Staging 成功，进入 Git Commit 输入模式
+		m.mode = ModeGitCommit
+		m.commandInput.Placeholder = "Commit message..."
+		m.commandInput.Prompt = "Commit: "
+		m.commandInput.Reset()
+		m.commandInput.Focus()
+		m.statusMsg = "🚀 已暂存! 请输入提交信息:"
 		m.focus = FocusCommand
-		// 同时后台刷新 Git 状态 (让文件变绿)
-		return m, checkGitStatusCmd()
+		// 同时后台刷新 Git 状态 (让文件变绿) + 输入框光标闪烁
+		return m, tea.Batch(checkGitStatusCmd(), textinput.Blink)
+	}
+	
+	// Default passive component updates (Blinks, Ticks, etc.)
+	var cmd tea.Cmd
+	switch m.mode {
+	case CommandMode, ModeGitCommit:
+		m.commandInput, cmd = m.commandInput.Update(msg)
+	case FuzzyFindMode:
+		m.finderInput, cmd = m.finderInput.Update(msg)
 	}
 
-	return m, nil
+	return m, cmd
 }
 
 // handleKeyPress 处理键盘输入
@@ -1472,8 +1553,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleGitMode(msg)
 	}
 
+
+
 	// 编辑器焦点
-	if m.focus == FocusEditor || m.focus == FocusCommand { // Command 模式也通常在主区域显示，或者覆盖之
+	if m.focus == FocusEditor || m.focus == FocusCommand || m.mode == ModeGitCommit { // Command 模式也通常在主区域显示，或者覆盖之
         switch m.mode {
         case NormalMode:
             return m.handleNormalMode(msg)
@@ -1483,9 +1566,11 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
             return m.handleCommandMode(msg)
         case FuzzyFindMode:
             return m.handleFuzzyFindMode(msg)
-        case WhichKeyMode:
-            return m.handleWhichKeyMode(msg)
-        case HelpMode:
+		case WhichKeyMode:
+			return m.handleWhichKeyMode(msg)
+		case ModeGitCommit:
+			return m.handleGitCommitMode(msg)
+		case HelpMode: // Handle Help Overlay:
             return m.handleHelpMode(msg)
         }
     }
@@ -1499,7 +1584,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	currPane := curTab.Panes[curTab.ActivePane]
 
 	switch msg.String() {
-	case "ctrl+\\", "alt+t":
+	case "ctrl+\\", "alt+t", "ctrl+t":
 		return m, openTerminalCmd()
 		
 	case "i":
@@ -1511,6 +1596,8 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Enter Command Mode
 		m.mode = CommandMode
 		m.commandBuffer = "" // Clear legacy buffer
+		m.commandInput.Prompt = ":"  // 重置为命令模式提示符
+		m.commandInput.Placeholder = ""
 		m.commandInput.Focus()
 		m.commandInput.SetValue("")
 		m.statusMsg = ""
@@ -1660,10 +1747,7 @@ func (m Model) handleGitMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.statusMsg = "请输入提交信息: :commit <msg>"
 		m.focus = FocusCommand
 	
-	case "C": // Shift+C: 智能提交 (Stage All + Commit)
-		// 1. Auto-Stage 所有文件 (异步)
-		m.statusMsg = "🚀 Staging changes..."
-		return m, stageAllCmd()
+
 	
 	case "r":
 		m.git.IsLoading = true
@@ -1692,6 +1776,16 @@ func (m Model) handleGitMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = NormalMode
 		m.statusMsg = "📝 编辑 Git 配置 (按 :w 保存)"
 		return m, loadFileCmd(configPath)
+
+	case "C":
+		// Commit Changes - 先自动暂存所有更改
+		if !m.git.IsRepo {
+			m.statusMsg = "⚠ 不是 Git 仓库"
+			return m, nil
+		}
+		// 先执行 git add -A，然后进入 commit 模式
+		m.statusMsg = "⏳ 暂存更改中..."
+		return m, stageAllCmd()
 
 	case "P": // Shift+P: 异步推送到远程 (流式反馈)
 		if !m.git.IsRepo {
@@ -1783,6 +1877,50 @@ func (m Model) handleGitMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.statusMsg = fmt.Sprintf("👀 查看 Diff: %s", file.Path)
 	}
 	return m, nil
+}
+
+func (m Model) handleGitCommitMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		// Abort
+		m.mode = NormalMode
+		m.commandInput.Blur()
+		m.commandInput.Reset() // Clear and reset state
+		m.statusMsg = "Commit aborted"
+		m.focus = FocusGit // Return to Git Panel
+		return m, nil
+
+	case "enter":
+		// Commit
+		msgVal := m.commandInput.Value()
+		if msgVal == "" { return m, nil }
+
+		err := m.runGitCommit(msgVal)
+		if err != nil {
+			m.statusMsg = "Commit Error: " + err.Error()
+		} else {
+			m.statusMsg = "Committed: " + msgVal
+			// Refresh Status immediately
+			return m, checkGitStatusCmd()
+		}
+
+		m.mode = NormalMode
+		m.commandInput.Blur()
+		m.commandInput.Reset()
+		m.focus = FocusGit // Return to Git Panel
+		return m, nil
+	}
+
+	// CRITICAL: Propagate events to Input Model
+	var cmd tea.Cmd
+	m.commandInput, cmd = m.commandInput.Update(msg)
+	return m, cmd
+}
+
+func (m *Model) runGitCommit(message string) error {
+	cmd := exec.Command("git", "commit", "-m", message)
+	cmd.Dir = m.fileTree.rootPath // 在项目目录中执行
+	return cmd.Run()
 }
 
 // handleCommandMode 处理命令模式下的按键（类似 Vim 的 Ex 命令）
@@ -1899,6 +2037,8 @@ func (m Model) handleFuzzyFindMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+
+
 // handleHelpMode 处理帮助页面交互
 func (m Model) handleHelpMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
@@ -2010,9 +2150,8 @@ func (m Model) handleWhichKeyMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 
 	case "t":
-		// Open Terminal
+		// Toggle Terminal (System Shell)
 		m.mode = NormalMode
-		m.syncSizes()
 		return m, openTerminalCmd()
 
 	case "T":
@@ -3000,6 +3139,8 @@ func (m *Model) syncSizes() {
 		availableHeight -= StatusBarHeight
 	}
 
+
+
 	// Safeguard
 	if availableHeight < 0 {
 		availableHeight = 0
@@ -3239,7 +3380,7 @@ func (m Model) View() string {
 		// Using WhichKeyHeight which is accounted for in calculateSizes
 		style := lipgloss.NewStyle().Height(WhichKeyHeight).MaxHeight(WhichKeyHeight)
 		bottom = style.Render(m.viewWhichKey())
-	} else if m.mode == CommandMode {
+	} else if m.mode == CommandMode || m.mode == ModeGitCommit {
 		// Command Input Bar (Vim Style)
 		style := lipgloss.NewStyle().
 			Width(m.width).
@@ -3251,11 +3392,12 @@ func (m Model) View() string {
 		bottom = m.renderStatusBar()
 	}
 
-	// 7. Final Strict Assembly: Header + Main + Bottom
-	frame := lipgloss.JoinVertical(lipgloss.Left, header, mainContent, bottom)
+	// Construct Final View
+	// Normal: Tabs + Content + Status
+	mainView := lipgloss.JoinVertical(lipgloss.Left, header, mainContent, bottom) 
 
 	// 8. Full-Frame Lock
-	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, frame)
+	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, mainView)
 }
 
 // viewWhichKey 渲染 WhichKey 菜单 (LazyVim-style Leader Key Menu)
